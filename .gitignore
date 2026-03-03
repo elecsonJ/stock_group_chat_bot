@@ -1,0 +1,25 @@
+# Environments
+.env
+
+# Dependencies
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# Project specific data
+chrome_data/
+data/
+news_archive/

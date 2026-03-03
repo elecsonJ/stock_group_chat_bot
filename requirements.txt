@@ -1,0 +1,10 @@
+discord.py
+openai
+anthropic
+google-genai
+yfinance
+feedparser
+python-dotenv
+beautifulsoup4
+requests
+pandas_ta

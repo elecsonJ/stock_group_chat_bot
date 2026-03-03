@@ -66,8 +66,66 @@ class DBManager:
             )
         ''')
 
+        # 5. 고품질 뉴스 아티클 저장 테이블 (정규화/중복제거)
+        self.cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS news_articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_key TEXT UNIQUE,
+                date TEXT,
+                source TEXT,
+                source_type TEXT,
+                section TEXT,
+                title TEXT,
+                url TEXT,
+                canonical_url TEXT,
+                published_at TEXT,
+                summary TEXT,
+                content_hash TEXT,
+                raw_json TEXT,
+                event_key TEXT,
+                fetched_at TEXT,
+                ingest_delay_sec INTEGER,
+                ingested_at TEXT
+            )
+            '''
+        )
+
+        # 6. 뉴스 이벤트 클러스터 저장 테이블
+        self.cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS news_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT UNIQUE,
+                date TEXT,
+                title TEXT,
+                summary TEXT,
+                source_count INTEGER,
+                article_count INTEGER,
+                confidence REAL,
+                sample_urls TEXT,
+                updated_at TEXT
+            )
+            '''
+        )
+
+        # 7. 소스별 수집 체크포인트(인덱싱 지연 보정용)
+        self.cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS news_ingest_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT UNIQUE,
+                last_success_at TEXT,
+                cursor_json TEXT,
+                updated_at TEXT
+            )
+            '''
+        )
+
         self._ensure_column("research_evidences", "query_norm", "TEXT")
         self._ensure_column("research_evidences", "created_at", "TEXT")
+        self._ensure_column("news_articles", "fetched_at", "TEXT")
+        self._ensure_column("news_articles", "ingest_delay_sec", "INTEGER")
 
         # 조회 성능 및 24시간 운영 안정성 향상을 위한 인덱스
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_news_date_keyword ON daily_news(date, keyword)')
@@ -75,6 +133,11 @@ class DBManager:
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_summaries_type_date ON summaries(summary_type, target_date)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_research_date_topic ON research_evidences(date, topic)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_research_querynorm_created ON research_evidences(query_norm, created_at)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_articles_date_source ON news_articles(date, source)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_articles_event ON news_articles(event_key)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_articles_source_pub ON news_articles(source, published_at)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_events_date_conf ON news_events(date, confidence)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_ckpt_source ON news_ingest_checkpoints(source)')
         self.conn.commit()
 
     def _ensure_column(self, table_name: str, column_name: str, col_type: str):
@@ -274,6 +337,123 @@ class DBManager:
         )
         self.conn.commit()
 
+    def save_news_articles_bulk(self, articles: list[dict]):
+        if not articles:
+            return
+        now_iso = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        for a in articles:
+            self.cursor.execute(
+                '''
+                INSERT INTO news_articles (
+                    article_key, date, source, source_type, section, title, url, canonical_url,
+                    published_at, summary, content_hash, raw_json, event_key, fetched_at,
+                    ingest_delay_sec, ingested_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(article_key) DO UPDATE SET
+                    date=excluded.date,
+                    source=excluded.source,
+                    source_type=excluded.source_type,
+                    section=excluded.section,
+                    title=excluded.title,
+                    url=excluded.url,
+                    canonical_url=excluded.canonical_url,
+                    published_at=excluded.published_at,
+                    summary=excluded.summary,
+                    content_hash=excluded.content_hash,
+                    raw_json=excluded.raw_json,
+                    event_key=excluded.event_key,
+                    fetched_at=excluded.fetched_at,
+                    ingest_delay_sec=excluded.ingest_delay_sec,
+                    ingested_at=excluded.ingested_at
+                ''',
+                (
+                    a.get("article_key"),
+                    a.get("date"),
+                    a.get("source"),
+                    a.get("source_type"),
+                    a.get("section"),
+                    a.get("title"),
+                    a.get("url"),
+                    a.get("canonical_url"),
+                    a.get("published_at"),
+                    a.get("summary"),
+                    a.get("content_hash"),
+                    json.dumps(a.get("raw_json", {}), ensure_ascii=False),
+                    a.get("event_key"),
+                    a.get("fetched_at"),
+                    int(a.get("ingest_delay_sec", 0) or 0),
+                    now_iso,
+                ),
+            )
+        self.conn.commit()
+
+    def save_news_events_bulk(self, events: list[dict]):
+        if not events:
+            return
+        now_iso = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        for e in events:
+            self.cursor.execute(
+                '''
+                INSERT INTO news_events (
+                    event_key, date, title, summary, source_count, article_count,
+                    confidence, sample_urls, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_key) DO UPDATE SET
+                    date=excluded.date,
+                    title=excluded.title,
+                    summary=excluded.summary,
+                    source_count=excluded.source_count,
+                    article_count=excluded.article_count,
+                    confidence=excluded.confidence,
+                    sample_urls=excluded.sample_urls,
+                    updated_at=excluded.updated_at
+                ''',
+                (
+                    e.get("event_key"),
+                    e.get("date"),
+                    e.get("title"),
+                    e.get("summary"),
+                    int(e.get("source_count", 0)),
+                    int(e.get("article_count", 0)),
+                    float(e.get("confidence", 0.0)),
+                    json.dumps(e.get("sample_urls", []), ensure_ascii=False),
+                    now_iso,
+                ),
+            )
+        self.conn.commit()
+
+    def get_latest_news_events(self, limit: int = 15) -> list[dict]:
+        self.cursor.execute(
+            '''
+            SELECT event_key, date, title, summary, source_count, article_count, confidence, sample_urls
+            FROM news_events
+            ORDER BY date DESC, confidence DESC, article_count DESC
+            LIMIT ?
+            ''',
+            (int(limit),),
+        )
+        rows = self.cursor.fetchall()
+        out = []
+        for r in rows:
+            sample_urls = []
+            try:
+                sample_urls = json.loads(r[7]) if r[7] else []
+            except Exception:
+                sample_urls = []
+            out.append(
+                {
+                    "event_key": r[0],
+                    "date": r[1],
+                    "title": r[2],
+                    "summary": r[3],
+                    "source_count": r[4],
+                    "article_count": r[5],
+                    "confidence": r[6],
+                    "sample_urls": sample_urls,
+                }
+            )
+        return out
+
     def get_cached_research_evidence(self, query: str, max_age_hours: int = 12) -> dict | None:
         if max_age_hours <= 0:
             return None
@@ -318,6 +498,52 @@ class DBManager:
             return None
         return payload
 
+    def get_news_ingest_checkpoint(self, source: str) -> dict | None:
+        key = (source or "").strip()
+        if not key:
+            return None
+        self.cursor.execute(
+            '''
+            SELECT source, last_success_at, cursor_json, updated_at
+            FROM news_ingest_checkpoints
+            WHERE source = ?
+            ''',
+            (key,),
+        )
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        cursor_payload = {}
+        try:
+            cursor_payload = json.loads(row[2]) if row[2] else {}
+        except Exception:
+            cursor_payload = {}
+        return {
+            "source": row[0],
+            "last_success_at": row[1],
+            "cursor": cursor_payload,
+            "updated_at": row[3],
+        }
+
+    def save_news_ingest_checkpoint(self, source: str, last_success_at: str, cursor: dict | None = None):
+        key = (source or "").strip()
+        if not key:
+            return
+        now_iso = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        cursor_json = json.dumps(cursor or {}, ensure_ascii=False)
+        self.cursor.execute(
+            '''
+            INSERT INTO news_ingest_checkpoints (source, last_success_at, cursor_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source) DO UPDATE SET
+                last_success_at=excluded.last_success_at,
+                cursor_json=excluded.cursor_json,
+                updated_at=excluded.updated_at
+            ''',
+            (key, last_success_at, cursor_json, now_iso),
+        )
+        self.conn.commit()
+
     def purge_old_data(self, retention_days: int = 180):
         """
         운영 기간이 길어질 때 DB 비대화를 막기 위한 보존 정책.
@@ -331,6 +557,18 @@ class DBManager:
         )
         self.cursor.execute(
             "DELETE FROM research_evidences WHERE date < date('now', ?)",
+            (f"-{retention_days} day",)
+        )
+        self.cursor.execute(
+            "DELETE FROM news_articles WHERE date < date('now', ?)",
+            (f"-{retention_days} day",)
+        )
+        self.cursor.execute(
+            "DELETE FROM news_events WHERE date < date('now', ?)",
+            (f"-{retention_days} day",)
+        )
+        self.cursor.execute(
+            "DELETE FROM news_ingest_checkpoints WHERE updated_at < datetime('now', ?)",
             (f"-{retention_days} day",)
         )
         self.conn.commit()

@@ -178,6 +178,7 @@ class DebateController:
             "claude-sonnet-4-6": "안전/가치 투자 및 반대/리스크 부각",
             "gemini-3-flash-preview": "제3의 시각 및 논리적 오류 저격"
         }
+        final_model_names = tuple(roles.keys())
         
         # ==========================================
         # Phase 1: 자동 리서치 국면 (Fact-Sheet 구축)
@@ -197,6 +198,7 @@ class DebateController:
         try:
             planner_tickers = ontology_plan.get("tickers", []) if isinstance(ontology_plan, dict) else []
             planner_searches = ontology_plan.get("web_queries", []) if isinstance(ontology_plan, dict) else []
+            query_upper_tokens = set(re.findall(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3})?\b", user_query.upper()))
 
             if local_available:
                 extract_json_str = await self.llm.get_local_response(extract_prompt, user_query)
@@ -214,12 +216,32 @@ class DebateController:
                 ts = str(t).strip()
                 if ts and ts not in merged_tickers:
                     merged_tickers.append(ts)
-            tickers = merged_tickers[:2]
+            # 쿼리 문맥과 무관한 환각 티커 제거: (1) 사용자 질문에 있거나 (2) 온톨로지 링크된 티커만 허용
+            linked_tickers = {
+                str(e.get("ticker", "")).strip().upper()
+                for e in (ontology_plan.get("linked_entities", []) if isinstance(ontology_plan, dict) else [])
+                if isinstance(e, dict)
+            }
+            filtered_tickers = []
+            for t in merged_tickers:
+                tu = t.upper()
+                if tu in query_upper_tokens or tu in linked_tickers:
+                    filtered_tickers.append(t)
+            tickers = filtered_tickers[:2]
 
             merged_searches = []
             seen_searches = set()
+            banned_search_fragments = (
+                "stock ticker company profile",
+                "검색할 구체적인 키워드",
+                "반대 관점 키워드",
+            )
             for q in [*planner_searches, *searches]:
                 qs = str(q).strip()
+                if not qs:
+                    continue
+                if any(b in qs.lower() for b in banned_search_fragments):
+                    continue
                 qn = re.sub(r"\s+", " ", qs.lower())
                 if qs and qn not in seen_searches:
                     merged_searches.append(qs)
@@ -251,12 +273,52 @@ class DebateController:
             "gemini-3-flash-preview": self.llm.get_gemini_response
         }
 
+        def _sanitize_model_output(text: str) -> str:
+            raw = str(text or "")
+            cleaned = re.sub(r"<thought>.*?</thought>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
+
+            # 일부 모델이 생산 공정/메타 로그를 앞에 붙이는 경우, 마지막 구분선 이후 본문만 사용
+            if "────────────────" in cleaned:
+                parts = cleaned.split("────────────────")
+                cleaned = (parts[-1] or "").strip()
+
+            meta_markers = (
+                "생산 공정", "분석 및 타겟", "사고과정", "지시사항 점검", "최종 다듬기",
+                "사고과정 제거", "완료.", "시작]", "종료]", "초안 작성", "핵심 논리 전개",
+            )
+            keep_tag_prefixes = ("[SEARCH:", "[최종 선택:", "[근거ID:", "[ACK", "[조준:")
+            out_lines = []
+            for line in cleaned.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if any(s.startswith(prefix) for prefix in keep_tag_prefixes):
+                    out_lines.append(line)
+                    continue
+                if s.startswith("[") and s.endswith("]"):
+                    low = s.lower()
+                    if any(m in low for m in meta_markers):
+                        continue
+                out_lines.append(line)
+            return "\n".join(out_lines).strip()
+
         def _extract_search_queries(text: str) -> list[str]:
             queries = re.findall(r"\[SEARCH:\s*(.+?)\]", text or "", flags=re.IGNORECASE | re.DOTALL)
             out = []
             seen = set()
+            banned_fragments = (
+                "검색할 구체적인 키워드",
+                "반대 관점 키워드",
+                "키워드",
+                "...",
+            )
             for q in queries:
                 qs = re.sub(r"\s+", " ", q.strip())
+                # 모델이 프롬프트 문구를 그대로 복붙하는 경우 차단
+                if not qs or any(b in qs for b in banned_fragments):
+                    continue
+                if len(qs) < 6:
+                    continue
                 qn = qs.lower()
                 if qs and qn not in seen:
                     out.append(qs)
@@ -350,6 +412,7 @@ class DebateController:
                 for model_n, rep_text in results:
                     # 내부 사고(<thought>)는 디스코드 UI에만 송출하고 공통 히스토리에서는 제거
                     clean_rep = re.sub(r'<thought>.*?</thought>', '', str(rep_text), flags=re.DOTALL).strip()
+                    clean_rep = _sanitize_model_output(clean_rep)
                     dyn_hist += f"[{model_n} {turn_idx}R 최초 발언]:\n{clean_rep}\n\n"
                     display_text = clean_rep if clean_rep else str(rep_text)
                     await send_chunked(ctx, f"🗣️ **[{model_n} 블라인드 발언]**\n{display_text}")
@@ -368,7 +431,8 @@ class DebateController:
                     "만약 확실한 판단을 위해 직접 확인해야 할 기사의 원문이나 인터넷 웹 검색이 필요하다면 답변 마지막 줄에 '[SEARCH: 검색할 구체적인 키워드]' 라고 적어둬. "
                     "3~4문장으로 작성하고, 내부 사고과정은 노출하지 마.\n"
                     "[치명적 규칙 (Anti-Anchoring)]: 토론 중 상대방이나 자신이 [SEARCH]를 통해 실시간 검색 팩트(예: 실적 하향, 새로운 수치)를 가져와 너의 기존 논거나 전제가 깨졌다면, 억지를 부리지 말고 유연하게 수용해라.\n"
-                    "[추가 강력 지시 (맞불 리서치)]: 만약 상대방이 [SEARCH]로 너에게 불리한 팩트를 들이밀었다면, 너도 방어하거나 반박하기 위해 그 팩트의 진위를 검증하는 [SEARCH: 반대 관점 키워드]를 적극적으로 사용하여 반격해라! 팩트 없이 말로만 우기면 무조건 패배한다."
+                    "[추가 강력 지시 (맞불 리서치)]: 상대가 SEARCH 근거를 제시하면, 그 근거를 검증/반박할 구체 쿼리를 직접 작성해 [SEARCH: ...]로 제시하라. "
+                    "문자 그대로 '검색할 구체적인 키워드' 또는 '반대 관점 키워드' 같은 플레이스홀더 문구는 절대 쓰지 마라."
                 )
                 
                 # 보조 함수: 요청에 [SEARCH: xxx] 가 있는지 확인하고 리서치 수행
@@ -475,6 +539,7 @@ class DebateController:
                         defense_rep = f"오류: {e}"
 
                     clean_defense = re.sub(r'<thought>.*?</thought>', '', str(defense_rep), flags=re.DOTALL).strip()
+                    clean_defense = _sanitize_model_output(clean_defense)
                     hist += f"[{target_model} {turn_idx}R 즉각 방어({attacker_model} 조준)]:\n{clean_defense}\n\n"
                     display_defense = clean_defense if clean_defense else str(defense_rep)
                     await send_chunked(ctx, f"🛡️ **[{target_model} 즉각 방어]**\n{display_defense}")
@@ -482,7 +547,7 @@ class DebateController:
                     if _has_ack(str(defense_rep)):
                         loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), target_model]
 
-                    hist, defense_research = await handle_research_request(target_model, str(defense_rep), hist)
+                    hist, defense_research = await handle_research_request(target_model, clean_defense, hist)
                     return hist, defense_research
 
                 # Turn 1: GPT 
@@ -494,14 +559,15 @@ class DebateController:
                     gpt_rep = f"<thought>에러 발생</thought> {e}"
                 
                 clean_gpt = re.sub(r'<thought>.*?</thought>', '', str(gpt_rep), flags=re.DOTALL).strip()
+                clean_gpt = _sanitize_model_output(clean_gpt)
                 dyn_hist += f"[{gpt_name} {turn_idx}R 주장]:\n{clean_gpt}\n\n"
                 display_gpt = clean_gpt if clean_gpt else str(gpt_rep)
                 await send_chunked(ctx, f"🗣️ **[{gpt_name}]**\n{display_gpt}")
                 if _has_ack(str(gpt_rep)):
                     loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), gpt_name]
-                dyn_hist, gpt_research = await handle_research_request(gpt_name, str(gpt_rep), dyn_hist)
+                dyn_hist, gpt_research = await handle_research_request(gpt_name, clean_gpt, dyn_hist)
                 defended_targets: set[str] = set()
-                dyn_hist, gpt_def_research = await maybe_instant_defense(gpt_name, str(gpt_rep), dyn_hist, defended_targets)
+                dyn_hist, gpt_def_research = await maybe_instant_defense(gpt_name, clean_gpt, dyn_hist, defended_targets)
 
                 # Turn 2: Claude 
                 await ctx.send(f"🗣️ **[{claude_name} 앞선 발언 타격 중...]**")
@@ -512,13 +578,14 @@ class DebateController:
                     claude_rep = f"<thought>에러 발생</thought> {e}"
                 
                 clean_claude = re.sub(r'<thought>.*?</thought>', '', str(claude_rep), flags=re.DOTALL).strip()
+                clean_claude = _sanitize_model_output(clean_claude)
                 dyn_hist += f"[{claude_name} {turn_idx}R 반박]:\n{clean_claude}\n\n"
                 display_claude = clean_claude if clean_claude else str(claude_rep)
                 await send_chunked(ctx, f"🗣️ **[{claude_name}]**\n{display_claude}")
                 if _has_ack(str(claude_rep)):
                     loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), claude_name]
-                dyn_hist, claude_research = await handle_research_request(claude_name, str(claude_rep), dyn_hist)
-                dyn_hist, claude_def_research = await maybe_instant_defense(claude_name, str(claude_rep), dyn_hist, defended_targets)
+                dyn_hist, claude_research = await handle_research_request(claude_name, clean_claude, dyn_hist)
+                dyn_hist, claude_def_research = await maybe_instant_defense(claude_name, clean_claude, dyn_hist, defended_targets)
 
                 # Turn 3: Gemini 
                 await ctx.send(f"🗣️ **[{gemini_name} 제3의 시각으로 국면 전환 중...]**")
@@ -529,13 +596,14 @@ class DebateController:
                     gemini_rep = f"<thought>에러 발생</thought> {e}"
                 
                 clean_gemini = re.sub(r'<thought>.*?</thought>', '', str(gemini_rep), flags=re.DOTALL).strip()
+                clean_gemini = _sanitize_model_output(clean_gemini)
                 dyn_hist += f"[{gemini_name} {turn_idx}R 타격]:\n{clean_gemini}\n\n"
                 display_gemini = clean_gemini if clean_gemini else str(gemini_rep)
                 await send_chunked(ctx, f"🗣️ **[{gemini_name}]**\n{display_gemini}")
                 if _has_ack(str(gemini_rep)):
                     loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), gemini_name]
-                dyn_hist, gemini_research = await handle_research_request(gemini_name, str(gemini_rep), dyn_hist)
-                dyn_hist, gemini_def_research = await maybe_instant_defense(gemini_name, str(gemini_rep), dyn_hist, defended_targets)
+                dyn_hist, gemini_research = await handle_research_request(gemini_name, clean_gemini, dyn_hist)
+                dyn_hist, gemini_def_research = await maybe_instant_defense(gemini_name, clean_gemini, dyn_hist, defended_targets)
 
                 research_count = (
                     gpt_research + claude_research + gemini_research
@@ -622,6 +690,7 @@ class DebateController:
             for model_n, rep_text in final_results:
                 repaired_text = await _repair_evidence_tag(model_n, str(rep_text))
                 clean_rep = re.sub(r'<thought>.*?</thought>', '', str(repaired_text), flags=re.DOTALL).strip()
+                clean_rep = _sanitize_model_output(clean_rep)
                 final_hist += f"[{model_n} {turn_idx}R 최종 결론]: {clean_rep}\n\n"
                 display_text = clean_rep if clean_rep else str(rep_text)
                 await send_chunked(ctx, f"🎯 **[{model_n} 최종 결론]**\n{display_text}")
@@ -649,8 +718,9 @@ class DebateController:
             return choice.strip()
 
         def _extract_latest_model_choice(history_text: str, model_name: str) -> str:
+            model_alt = "|".join(re.escape(n) for n in final_model_names)
             pattern = re.compile(
-                rf"\[{re.escape(model_name)} \d+R 최종 결론\]:\s*(.*?)(?=\n\[[^\]]+\]|\Z)",
+                rf"\[{re.escape(model_name)} \d+R 최종 결론\]:\s*(.*?)(?=\n\[(?:{model_alt}) \d+R 최종 결론\]:|\Z)",
                 flags=re.DOTALL
             )
             matches = list(pattern.finditer(history_text))

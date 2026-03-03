@@ -45,6 +45,14 @@
 - `!토론` 시 포트폴리오 컨텍스트 자동 주입
 - 구현 파일: `src/portfolio_manager.py`, `src/main.py`, `src/debate_manager.py`
 
+9. 고품질 뉴스 파이프라인
+- NYT + Reuters + SEC + FED 다중 소스 수집
+- 10분 폴링(overlap 재조회) + 일 1회 백필(늦게 색인된 기사 보정)
+- 정규화/중복 제거/이벤트 클러스터링
+- 기사 단위 신선도 추적(`fetched_at`, `ingest_delay_sec`)
+- DB(`news_articles`, `news_events`) + 파일(`news_archive/*.txt`, `*.json`) 동시 저장
+- 구현 파일: `src/data_fetcher/premium_crawler.py`, `src/db_manager.py`
+
 ## 2) 기술 스택
 1. 언어/런타임
 - Python 3.x
@@ -132,4 +140,6 @@
 - 최소: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
 
 4. Windows 스케줄러
-- `run_news.bat`, `run_daily.bat`, `run_weekly.bat`, `run_monthly.bat` 등록
+- `run_news.bat` 10분 주기 등록
+- `run_news_backfill.bat` 하루 1회 등록
+- `run_daily.bat`, `run_weekly.bat`, `run_monthly.bat` 등록

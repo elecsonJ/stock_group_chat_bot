@@ -38,6 +38,10 @@ class HybridResearchPlanner:
             "투자",
             "토론",
             "토론하고",
+            "토론해줘",
+            "중심으로",
+            "중심으",
+            "수혜인지",
             "관련",
             "현재",
             "최근",
@@ -107,15 +111,17 @@ class HybridResearchPlanner:
                     matched = True
                     break
 
-                fuzzy_hits = self.store.search_alias_contains(cand_v, limit=2)
-                if fuzzy_hits:
-                    for hit in fuzzy_hits:
-                        eid = hit.get("entity_id")
-                        if eid and eid not in seen_ids:
-                            linked.append(hit)
-                            seen_ids.add(eid)
-                    matched = True
-                    break
+                # contains 기반 fuzzy는 오매칭 위험이 커서 길이가 충분한 영문/숫자 토큰에만 제한
+                if len(cand_v) >= 4 and re.search(r"[A-Za-z0-9]", cand_v):
+                    fuzzy_hits = self.store.search_alias_contains(cand_v, limit=2)
+                    if fuzzy_hits:
+                        for hit in fuzzy_hits:
+                            eid = hit.get("entity_id")
+                            if eid and eid not in seen_ids:
+                                linked.append(hit)
+                                seen_ids.add(eid)
+                        matched = True
+                        break
 
             if not matched:
                 unresolved.append(cand)
@@ -181,8 +187,7 @@ class HybridResearchPlanner:
         for x in expansion_nodes[:3]:
             web_queries.append(f"{x['from']} {x['predicate']} {x['to']} evidence")
 
-        for miss in unresolved[:3]:
-            web_queries.append(f"{miss} stock ticker company profile")
+        # unresolved 토큰은 잡음이 많아 일반화된 ticker profile 쿼리는 생성하지 않음
 
         # dedup + 제한
         dedup_web = []

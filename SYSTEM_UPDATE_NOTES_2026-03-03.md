@@ -15,6 +15,8 @@
 12. 최종 결론 근거ID 강제 태그(`[근거ID: EVxxxx]`)
 13. RAG FTS 인덱스 도입(FTS5 + LIKE fallback)
 14. SEARCH evidence 기반 온톨로지 관계 자동추출기 추가
+15. 뉴스 스크래핑 고도화: 다중 소스 수집 + 정규화 + 이벤트 클러스터링 + DB 구조화 저장
+16. 뉴스 폴링 강화: 10분 overlap 윈도우 + 일간 backfill + 체크포인트/ingest delay 추적
 
 ## 온톨로지 통합
 1. `src/ontology/store.py`: 엔티티/별칭/관계 저장소
@@ -22,6 +24,7 @@
 3. `src/ontology_bootstrap.py`: SEC/DART-KRX/LEI/FIGI ingest
 4. `src/debate_manager.py`: 온톨로지 플랜을 Fact-Sheet 구성에 병합
 5. `src/ontology/relation_miner.py`: evidence 텍스트에서 관계 자동추출
+6. `src/data_fetcher/premium_crawler.py`: 고품질 뉴스 수집/클러스터링 파이프라인
 
 ## 문서 정리
 1. 런타임 스펙: `docs_debate_process.md`

@@ -4,12 +4,13 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 ## 🚀 주요 기능 및 명령어 (Features & Commands)
 - `!토론 [주제]`: 3개의 프론티어 AI(GPT, Claude, Gemini)와 로컬 모델(gpt-oss:20b)이 교차 반박 토론을 수행합니다. `[SEARCH: ...]`가 발생하면 Evidence 패키지(URL/발췌/도메인)가 생성 및 저장됩니다.
 - `!질문 [과거 맥락 질문]`: 하이브리드 RAG (키워드 추출 + SQLite FTS 우선 검색 + LIKE fallback) 시스템을 통해 수개월 전의 회의록, 판결문, 요약본을 뒤져 가장 정확한 인사이트를 가져옵니다.
-- `!뉴스`: 백그라운드 스케줄러(`scraper_job.py`)가 매일 수집해둔 방대한 뉴욕타임스 프리미엄 글로벌 뉴스를 디스코드에서 바로 읽기 좋게 끊어(Chunking) 보여줍니다.
+- `!뉴스`: 다중 소스(NYT + Reuters + SEC + FED)로 수집/정규화/이벤트 클러스터링된 구조화 뉴스 브리핑을 보여줍니다.
 - `!포트폴리오`: 로컬 포트폴리오 파일을 로드/파싱하고, 이후 `!토론`에서 LLM 컨텍스트로 자동 주입합니다.
 - `!포트변동`: 보유 종목의 현재가 기준 손익(PnL) 스냅샷을 계산해 보여줍니다.
 
 ## 🧠 아키텍처 개요
 - **Decoupled Job Scheduling**: 뉴스 스크래핑과 데이터 요약(Daily, Weekly, Monthly)은 봇 내부 루프가 아닌 가벼운 Windows Task Scheduler 기반(`.bat`)으로 분리되어 메인 디스코드 봇은 응답 대기에만 집중합니다.
+- **High-Quality News Pipeline**: 뉴스는 다중 소스 수집 후 정규화/중복제거/이벤트 클러스터링을 거쳐 `news_events/news_articles`와 `news_archive/*.json`으로 저장됩니다. 10분 폴링 시 이전 성공 시점 기준 overlap 윈도우를 재조회하고, 백필 실행으로 늦게 색인된 기사까지 보정합니다.
 - **Hybrid RAG Layer**: 토론 파이프라인(Phase 0)에 RAG가 결합되어 과거 실패/성공 사례를 이번 토론의 바탕(Base Argument)으로 씁니다.
 - **Anti-Hallucination**: 외부 API 장애(529 Overloaded 등) 발생 시 안전한 Retry 로직을 갖추었고, 토론은 내부 사고 노출 없이 근거 중심 출력으로 제한됩니다. 또한 리서치 결과는 Evidence 패키지 형태로 저장되어 재검증이 가능합니다.
 - **Evidence-ID Enforcement**: 최종 변론에는 `[근거ID: EVxxxx]` 태그를 강제해 근거 없는 결론 출력을 줄입니다.
@@ -30,6 +31,12 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 - 리서치 캐시(선택): `RESEARCH_CACHE_TTL_HOURS=12`
 - 웹 fetch 병렬수(선택): `WEB_FETCH_CONCURRENCY=4`
 - LLM 회로 차단기(선택): `CIRCUIT_FAILURE_THRESHOLD=3`, `CIRCUIT_COOLDOWN_SEC=60`
+- 뉴스 품질 파라미터(선택): `NEWS_MAX_PER_SOURCE`, `NEWS_MAX_EVENTS`, `NEWS_LOOKBACK_HOURS`, `NYT_RATE_LIMIT_SECONDS`, `NEWS_REQUEST_TIMEOUT_SEC`
+- 10분 폴링/백필 파라미터(선택): `NEWS_POLL_OVERLAP_MIN`, `NEWS_BACKFILL_HOURS`
+
+## 🕒 Windows 스케줄러 권장
+- `run_news.bat`: 10분마다 실행(실시간 수집 + overlap 재조회)
+- `run_news_backfill.bat`: 하루 1회 실행(기본 최근 48시간 백필 보정)
 
 ## 🧾 포트폴리오 입력 포맷
 - 기본 파일 경로: `data/my_portfolio.md` (`PORTFOLIO_FILE_PATH`로 변경 가능)

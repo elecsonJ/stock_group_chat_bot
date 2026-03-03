@@ -56,6 +56,32 @@ async def 뉴스(ctx):
     """
     오늘 저장된 프리미엄 뉴스를 보기 좋게 출력합니다.
     """
+    # 1) 구조화 이벤트(DB) 우선 출력
+    try:
+        events = db_manager.get_latest_news_events(limit=12)
+    except Exception:
+        events = []
+
+    if events:
+        lines = ["📰 **[최신 구조화 뉴스 이벤트 브리핑]**"]
+        for idx, e in enumerate(events, 1):
+            lines.append(
+                f"{idx}. {e.get('title')} ({e.get('date')}) "
+                f"[conf={e.get('confidence')} / sources={e.get('source_count')} / articles={e.get('article_count')}]"
+            )
+            lines.append(f"   요약: {e.get('summary')}")
+            for u in (e.get("sample_urls") or [])[:2]:
+                lines.append(f"   - {u}")
+
+        msg = "\n".join(lines)
+        if len(msg) <= 1900:
+            await ctx.send(msg)
+        else:
+            for i in range(0, len(msg), 1800):
+                await ctx.send(msg[i:i + 1800])
+        return
+
+    # 2) 기존 파일 아카이브 fallback
     import glob
     news_dir = os.path.join(os.path.dirname(__file__), "..", "news_archive")
     files = glob.glob(os.path.join(news_dir, "premium_news_*.txt"))

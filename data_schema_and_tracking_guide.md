@@ -10,7 +10,7 @@
 ```
 
 ## SQLite 테이블
-현재 기본 테이블은 4개(+FTS 가상 테이블)입니다.
+현재 기본 테이블은 7개(+FTS 가상 테이블)입니다.
 
 1. `daily_news`
 - 날짜/키워드 기반 단기 뉴스 캐시
@@ -29,7 +29,20 @@
 - URL/도메인/발췌/제약/요약이 JSON으로 보관됨
 - 세션 전역 근거ID(`EV0001` 등)가 evidence 항목에 포함됨
 
-5. `debates_fts`, `summaries_fts` (FTS5 virtual table)
+5. `news_articles`
+- 다중 소스에서 수집된 정규화 기사 저장
+- `article_key` 기준 중복 제거, `event_key`로 이벤트 연결
+- `fetched_at`, `ingest_delay_sec`로 신선도 추적
+
+6. `news_events`
+- 기사 클러스터링 결과(이벤트 단위) 저장
+- `confidence`, `source_count`, `article_count`, `sample_urls` 포함
+
+7. `news_ingest_checkpoints`
+- 소스별 마지막 성공 시점/커서 저장
+- 10분 폴링 overlap 윈도우 계산과 백필 보정에 사용
+
+8. `debates_fts`, `summaries_fts` (FTS5 virtual table)
 - `debates`, `summaries`의 전문 검색 인덱스
 - 트리거 기반 동기화(`INSERT/UPDATE/DELETE`)
 
@@ -38,7 +51,7 @@
 1. `WAL` 모드
 2. `busy_timeout=20000`
 3. 조회 인덱스(`date`, `summary_type`, `topic` 등)
-4. 보존 정책 purge(`daily_news`, `research_evidences`) 기본 180일
+4. 보존 정책 purge(`daily_news`, `research_evidences`, `news_articles`, `news_events`, `news_ingest_checkpoints`) 기본 180일
 
 ## RAG 동작 메모
 현재 RAG 조회 방식은 **FTS 우선 + LIKE fallback** 입니다.

@@ -41,10 +41,17 @@ python src/main.py
 ## 6) 스케줄러 작업
 배치 파일은 프로젝트 루트 상대경로로 동작합니다.
 
-1. `run_news.bat`
-2. `run_daily.bat`
-3. `run_weekly.bat`
-4. `run_monthly.bat`
+1. `run_news.bat` (권장: 10분마다 실행)
+2. `run_news_backfill.bat` (권장: 하루 1회 실행, 늦게 색인된 기사 보정)
+3. `run_daily.bat`
+4. `run_weekly.bat`
+5. `run_monthly.bat`
+
+예시(`관리자 CMD`):
+```cmd
+schtasks /Create /TN "StockBot-News-Poll-10m" /TR "\"C:\path\to\stock_group_chat_bot\run_news.bat\"" /SC MINUTE /MO 10 /F
+schtasks /Create /TN "StockBot-News-Backfill" /TR "\"C:\path\to\stock_group_chat_bot\run_news_backfill.bat\"" /SC DAILY /ST 02:10 /F
+```
 
 ## 7) 장애 시
 1. 로컬 모델 장애면 강등 모드로 자동 전환됩니다.

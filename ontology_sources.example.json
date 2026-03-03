@@ -1,0 +1,10 @@
+{
+  "sec_company_tickers_json": "data_sources/sec/company_tickers.json",
+  "dart_krx_csv": "data_sources/kr/dart_krx.csv",
+  "gleif_lei_csv": "data_sources/lei/lei.csv",
+  "figi_csv": "data_sources/figi/figi.csv",
+  "notes": [
+    "파일은 사용자 로컬에 두고 git에 커밋하지 마세요.",
+    "업데이트 주기: 식별자/법인은 주 1회, 뉴스/검색은 실시간."
+  ]
+}

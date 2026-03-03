@@ -1,9 +1,13 @@
 import asyncio
+import os
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
 import httpx
 import yfinance as yf
-from typing import List, Dict
+from typing import List, Dict, Any
+from datetime import datetime
+from urllib.parse import urlparse
+import json
 
 class FactCheckAgent:
     def __init__(self, llm_manager):
@@ -14,7 +18,9 @@ class FactCheckAgent:
         """
         self.ddgs = DDGS()
         self.llm_manager = llm_manager
-        self.max_results = 5 
+        self.max_results = 5
+        self.fetch_concurrency = max(1, int(os.getenv("WEB_FETCH_CONCURRENCY", "4")))
+        self.fetch_timeout_sec = max(5, int(os.getenv("WEB_FETCH_TIMEOUT_SEC", "10")))
 
     async def _extract_search_queries(self, ai_statement: str) -> List[str]:
         """
@@ -29,7 +35,10 @@ class FactCheckAgent:
             f"[문장]: {ai_statement}"
         )
         # 로컬 모델(gpt-oss-20b)에게 추출을 시킴
-        query = await self.llm_manager.get_local_response("너는 검색어 추출기야.", prompt)
+        try:
+            query = await self.llm_manager.get_local_response("너는 검색어 추출기야.", prompt)
+        except Exception:
+            return []
         
         # 모델 연결 실패 에러가 검색어로 들어가는 것을 방지
         if not query or "Error connecting" in query or "Local Model Error" in query:
@@ -49,6 +58,18 @@ class FactCheckAgent:
         except Exception as e:
             pass
         return results
+
+    async def _search_web_async(self, query: str) -> List[Dict]:
+        try:
+            return await asyncio.to_thread(self._search_web, query)
+        except Exception:
+            return []
+
+    def _safe_domain(self, url: str) -> str:
+        try:
+            return urlparse(url).netloc.lower()
+        except Exception:
+            return ""
 
     async def get_stock_data(self, ticker: str) -> str:
         """yfinance를 통해 실시간 주가 및 재무 데이터를 가져옴"""
@@ -72,43 +93,116 @@ class FactCheckAgent:
         except Exception as e:
             return f"{ticker} 주식 데이터 조회 실패: {str(e)}"
 
-    async def _fetch_page_text(self, url: str) -> str:
+    async def _fetch_page_text(self, client: httpx.AsyncClient, url: str) -> str:
         """URL에 접속해 본문 텍스트(BeautifulSoup)를 긁어옴"""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url, follow_redirects=True)
-                soup = BeautifulSoup(resp.content, 'html.parser')
-                text = ' '.join([p.text for p in soup.find_all('p')])
-                return text[:1500] # 토큰 폭발 방지 (최대 1500자만 리딩)
+            resp = await client.get(url, follow_redirects=True)
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            text = ' '.join([p.text for p in soup.find_all('p')])
+            return text[:1500] # 토큰 폭발 방지 (최대 1500자만 리딩)
         except:
             return ""
+
+    async def run_deep_research_package(self, query: str) -> Dict[str, Any]:
+        search_results = await self._search_web_async(query)
+        generated_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        package: Dict[str, Any] = {
+            "query": query,
+            "generated_at_utc": generated_at,
+            "status": "ok",
+            "evidences": [],
+            "limitations": [],
+        }
+
+        if not search_results:
+            package["status"] = "no_results"
+            package["limitations"].append("검색 결과가 없어 증거를 생성하지 못했습니다.")
+            package["summary"] = f"'{query}'에 대한 최신 검색 결과가 없습니다."
+            return package
+
+        semaphore = asyncio.Semaphore(self.fetch_concurrency)
+
+        async def build_evidence(idx: int, r: dict, client: httpx.AsyncClient) -> dict | None:
+            url = r.get("href", "")
+            if not url:
+                return None
+            async with semaphore:
+                full_text = await self._fetch_page_text(client, url)
+            title = (r.get("title", "") or "").strip()
+            snippet = (r.get("body", "") or "").strip()
+            excerpt = (full_text or "").strip()
+            return {
+                "evidence_id": f"E{idx}",
+                "title": title,
+                "url": url,
+                "domain": self._safe_domain(url),
+                "snippet": snippet[:300],
+                "excerpt": excerpt[:450],
+                "extraction_method": "ddgs.text + bs4(p tags)",
+            }
+
+        async with httpx.AsyncClient(timeout=float(self.fetch_timeout_sec)) as client:
+            tasks = [
+                build_evidence(idx, r, client)
+                for idx, r in enumerate(search_results, 1)
+            ]
+            fetched = await asyncio.gather(*tasks, return_exceptions=True)
+
+        evidences = []
+        for item in fetched:
+            if isinstance(item, dict):
+                evidences.append(item)
+
+        if not evidences:
+            package["status"] = "no_extractable_evidence"
+            package["limitations"].append("URL은 있었지만 본문 발췌를 확보하지 못했습니다.")
+            package["summary"] = f"'{query}' 검색은 되었으나 본문 기반 증거 생성에 실패했습니다."
+            return package
+
+        package["evidences"] = evidences
+        if len(evidences) < 3:
+            package["limitations"].append("증거 개수가 적어 신뢰도가 낮을 수 있습니다.")
+
+        summary_system_prompt = (
+            "너는 수석 리서처야. 아래 JSON 증거 패키지만 근거로 5개 이내 불릿으로 요약해.\n"
+            "규칙:\n"
+            "1) 없는 사실 추가 금지.\n"
+            "2) 각 불릿 말미에 (근거: E번호, 도메인) 표기.\n"
+            "3) 마지막에 '검증 상태: 충분/부분/부족' 중 하나와 이유 1문장."
+        )
+        summary_user_prompt = json.dumps(package, ensure_ascii=False, indent=2)
+        try:
+            summary = await self.llm_manager.get_local_response(summary_system_prompt, summary_user_prompt)
+            package["summary"] = summary
+        except Exception:
+            package["limitations"].append("로컬 모델 요약 생성 실패: raw evidence만 제공")
+            package["summary"] = "로컬 요약 실패로 원시 증거만 제공합니다. 출처 목록을 직접 검토하세요."
+        return package
 
     async def run_deep_research(self, query: str) -> str:
         """
         API 모델이 요청한 특정 검색어에 대해 원문 스크래핑 심층 리서치를 수행하고 요약해 반환.
         """
-        search_results = self._search_web(query)
-        if not search_results:
-            return f"'{query}'에 대한 최신 검색 결과가 없습니다. 기존 지식 기반으로 판단하세요."
-            
-        context_blocks = []
-        for r in search_results:
-            url = r.get('href', '')
-            if url:
-                full_text = await self._fetch_page_text(url)
-                block = f"- 제목: {r.get('title', '')}\n  요약: {r.get('body', '')}\n  원문 발췌: {full_text}"
-                context_blocks.append(block)
-            
-        context_str = "\n\n".join(context_blocks)
-        
-        system_prompt = (
-            "너는 수석 리서처야. 주어진 [웹 검색 결과](제목, 요약, 원문 발췌)를 분석하여 토론자들에게 제공할 '심층 리서치 레포트'를 작성해.\n"
-            "단순 요약을 넘어서, 주식 투자에 영향을 미칠 수 있는 구체적인 수치, 핵심 악재/호재 트렌드, 애널리스트의 논리를 구조화된 글(불릿 포인트 활용)로 명확하게 제시해. 길이는 600자 내외로 작성해."
+        package = await self.run_deep_research_package(query)
+        if package.get("status") != "ok":
+            return package.get("summary", f"'{query}'에 대한 리서치 결과가 부족합니다.")
+
+        source_lines = []
+        for ev in package.get("evidences", []):
+            source_lines.append(f"- {ev.get('evidence_id')}: {ev.get('title')} ({ev.get('domain')})\n  {ev.get('url')}")
+
+        sources = "\n".join(source_lines[:5])
+        summary = package.get("summary", "")
+        return (
+            f"[Evidence Package]\n"
+            f"- query: {package.get('query')}\n"
+            f"- generated_at_utc: {package.get('generated_at_utc')}\n"
+            f"- evidence_count: {len(package.get('evidences', []))}\n"
+            f"- limitations: {package.get('limitations', [])}\n\n"
+            f"[요약]\n{summary}\n\n"
+            f"[출처 목록]\n{sources}"
         )
-        user_prompt = f"[검색 키워드: {query}]\n\n[웹 검색 결과]\n{context_str}\n\n위 내용을 분석하여 심층 리서치 레포트를 작성해줘:"
-        
-        summary = await self.llm_manager.get_local_response(system_prompt, user_prompt)
-        return summary
 
     async def verify_statement(self, ai_name: str, ai_statement: str) -> str:
         """
@@ -142,7 +236,10 @@ class FactCheckAgent:
             f"검증 결과 및 이유를 서술해:"
         )
 
-        verification_result = await self.llm_manager.get_local_response(system_prompt, user_prompt)
+        try:
+            verification_result = await self.llm_manager.get_local_response(system_prompt, user_prompt)
+        except Exception as e:
+            verification_result = f"로컬 Fact-Check 판독기 오류: {e}"
         
         # 최종 리턴 포맷: 모델의 주장 바로 아래에 이 첨언이 달리게 됩니다.
         links = "\n".join([f"({r['href']})" for r in search_results])

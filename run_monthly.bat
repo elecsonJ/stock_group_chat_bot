@@ -1,2 +1,4 @@
-cd c:\Users\gkswo\my_projects\ai_group_chat_bot
-python src/summarizer.py monthly
+@echo off
+setlocal
+cd /d "%~dp0"
+python src\summarizer.py monthly

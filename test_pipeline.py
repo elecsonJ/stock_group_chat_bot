@@ -9,11 +9,16 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 # .env 파일 로드 (로컬 모델 및 API 등 환경 변수)
 load_dotenv()
 
-# 우리가 만든 모듈들 가져오기
-from data_fetcher.pipeline import MasterDataPipeline
-from llm_client import LLMClientManager
-
 async def test_data_pipeline():
+    try:
+        # 우리가 만든 모듈들 가져오기 (의존성 설치 전 실패 방지)
+        from data_fetcher.pipeline import MasterDataPipeline
+        from llm_client import LLMClientManager
+    except Exception as e:
+        print(f"❌ 모듈 로드 실패: {e}")
+        print("   먼저 `pip install -r requirements.txt` 를 실행하세요.")
+        return
+
     print("==================================================")
     print("1. [테스트 초기화] 파이프라인 엔진을 조립합니다...")
     # 실제 로컬/API 모델 클라이언트 매니저 생성 (뉴스 요약에 로컬 모델 필요)
@@ -25,17 +30,17 @@ async def test_data_pipeline():
     
     # 테스트할 종목 티커 및 뉴스 검색어 설정
     tickers_to_test = ["TSLA", "NVDA"]
-    search_query = "Tesla Nvidia earnings and market outlook"
+    search_queries = ["Tesla Nvidia earnings and market outlook"]
     
     print("\n2. [데이터 수집 시작] 거시경제, 펀더멘털, 딥 뉴스 스크래핑 및 요약을 병렬로 수행합니다...")
     print(f"👉 대상 티커: {tickers_to_test}")
-    print(f"👉 뉴스 검색어: '{search_query}'")
+    print(f"👉 뉴스 검색어: '{search_queries}'")
     
     try:
         # 이 함수 하나로 3가지 작업(매크로, 개별주식, 뉴스 대량수집+요약)이 동시에 굴러갑니다.
         final_fact_sheet = await pipeline.build_ultimate_fact_sheet(
             tickers=tickers_to_test, 
-            search_query=search_query
+            search_queries=search_queries
         )
         
         print("\n==================================================")

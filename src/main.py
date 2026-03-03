@@ -11,6 +11,7 @@ from debate_manager import DebateController
 from db_manager import DBManager
 from data_fetcher.premium_crawler import PremiumCrawler
 from rag_agent import RAGAgent
+from portfolio_manager import PortfolioManager
 
 load_dotenv()
 
@@ -23,15 +24,32 @@ crawler = InvestmentCrawler()
 fact_checker = FactCheckAgent(llm_manager)
 db_manager = DBManager()
 rag_agent = RAGAgent(llm_manager)
+portfolio_manager = PortfolioManager()
 
 # 채널별 대화 기록(Context)을 저장하는 딕셔너리
 channel_memory = {}
+channel_portfolio_context = {}
+MAX_CHANNEL_HISTORY_CHARS = 120000
+
+
+async def send_chunked(channel, text: str, chunk_size: int = 1800):
+    txt = str(text or "")
+    if len(txt) <= chunk_size:
+        await channel.send(txt)
+        return
+    for i in range(0, len(txt), chunk_size):
+        await channel.send(txt[i:i + chunk_size])
 
 # 봇이 준비되었을 때
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
     print('------')
+    try:
+        db_manager.purge_old_data(retention_days=180)
+        print("[DB] 오래된 daily_news/research_evidences 정리 완료 (180일)")
+    except Exception as e:
+        print(f"[DB] 보존 정책 정리 실패: {e}")
 
 @bot.command()
 async def 뉴스(ctx):
@@ -92,6 +110,49 @@ async def 질문(ctx, *, user_query: str):
     except Exception as e:
         await ctx.send(f"⚠️ RAG 검색 중 오류 발생: {e}")
 
+
+@bot.command(name="포트폴리오")
+async def portfolio_cmd(ctx):
+    """
+    로컬 포트폴리오 파일을 로드/파싱해 표시하고, 이후 !토론에서 LLM 컨텍스트로 주입합니다.
+    """
+    raw = portfolio_manager.load_raw_portfolio()
+    if raw is None:
+        await ctx.send(
+            f"⚠️ 포트폴리오 파일이 없습니다: `{portfolio_manager.file_path}`\n"
+            "파일을 생성한 뒤 다시 시도하세요."
+        )
+        return
+    holdings, warnings = portfolio_manager.parse_holdings(raw)
+    holdings_agg = portfolio_manager.aggregate_holdings(holdings)
+    context = portfolio_manager.build_llm_context(holdings_agg, raw_text=raw)
+    channel_portfolio_context[ctx.channel.id] = context
+    report = portfolio_manager.render_portfolio_text(raw, holdings_agg, warnings)
+    report += "\n\n✅ 이 채널의 다음 `!토론`부터 포트폴리오 컨텍스트가 자동 주입됩니다."
+    await send_chunked(ctx, report)
+
+
+@bot.command(name="포트변동")
+async def portfolio_change_cmd(ctx):
+    """
+    포트폴리오 기준 현재 변동(PnL)을 계산해 출력합니다.
+    """
+    raw = portfolio_manager.load_raw_portfolio()
+    if raw is None:
+        await ctx.send(f"⚠️ 포트폴리오 파일이 없습니다: `{portfolio_manager.file_path}`")
+        return
+    holdings, warnings = portfolio_manager.parse_holdings(raw)
+    holdings_agg = portfolio_manager.aggregate_holdings(holdings)
+    if not holdings_agg:
+        base_report = portfolio_manager.render_portfolio_text(raw, holdings_agg, warnings)
+        await send_chunked(ctx, f"{base_report}\n\nℹ️ 변동 계산 가능한 보유 종목이 없습니다.")
+        return
+    snapshot = await portfolio_manager.get_variation_snapshot(holdings_agg)
+    text = portfolio_manager.render_variation_text(snapshot)
+    if warnings:
+        text += f"\n\n⚠️ 파싱 경고: {' | '.join(warnings[:3])}"
+    await send_chunked(ctx, text)
+
 @bot.command()
 async def 토론(ctx, *, user_query: str):
     """
@@ -99,9 +160,19 @@ async def 토론(ctx, *, user_query: str):
     사용 예시: !토론 워렌 버핏이 최근 산 전기차 주식이 뭐야?
     """
     debate_controller = DebateController(llm_manager, fact_checker, crawler)
+    raw_portfolio = portfolio_manager.load_raw_portfolio()
+    if raw_portfolio:
+        holdings, _warnings = portfolio_manager.parse_holdings(raw_portfolio)
+        holdings_agg = portfolio_manager.aggregate_holdings(holdings)
+        auto_context = portfolio_manager.build_llm_context(holdings_agg, raw_text=raw_portfolio)
+        channel_portfolio_context[ctx.channel.id] = auto_context
+
+    portfolio_context = channel_portfolio_context.get(ctx.channel.id, "")
     
     # 2~3라운드의 거대한 토론 및 팩트체크 로직을 비동기로 실행
-    final_history, debate_id = await debate_controller.run_full_debate(ctx, user_query)
+    final_history, debate_id = await debate_controller.run_full_debate(
+        ctx, user_query, portfolio_context=portfolio_context
+    )
     
     # ==========================
     # 결론 보류 및 저장 안내
@@ -114,7 +185,7 @@ async def 토론(ctx, *, user_query: str):
     
     # 🌟 핵심: !토론 을 칠 때마다 기존 기억(history)은 덮어씌워지고 백지에서 '새로운 주제'로 시작됩니다.
     channel_memory[ctx.channel.id] = {
-        "history": final_history,
+        "history": final_history[-MAX_CHANNEL_HISTORY_CHARS:],
         "db_id": debate_id
     }
 
@@ -154,6 +225,8 @@ async def on_message(message):
         # AI 다음 기억을 위해 자신이 한 대답도 추가
         reply_log = f"gpt-5.2-2025-12-11 응답: {reply}\n"
         mem["history"] += reply_log
+        if len(mem["history"]) > MAX_CHANNEL_HISTORY_CHARS:
+            mem["history"] = mem["history"][-MAX_CHANNEL_HISTORY_CHARS:]
         
         # 🔥 영구 저장: 방금 추가된 대화(사용자 질문 + GPT 응답)를 기존 SQLite 회의록 맨 아래에 이어 붙임!
         db_manager.update_debate_log(mem["db_id"], added_log + reply_log)

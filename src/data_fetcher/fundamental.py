@@ -34,15 +34,18 @@ class AdvancedDataFetcher:
                 roe = info.get('returnOnEquity', 0)
                 if isinstance(roe, float): roe = f"{roe*100:.2f}%"
                 
-                dividend_yield = info.get('dividendYield', 0)
+                dividend_yield_raw = info.get('dividendYield', 0)
+                dividend_yield = dividend_yield_raw
                 if isinstance(dividend_yield, float): dividend_yield = f"{dividend_yield*100:.2f}%"
                 
                 # 3. 기관 / 공매도 / 내부자 데이터
                 short_ratio = info.get('shortRatio', 'N/A')
-                short_percent = info.get('shortPercentOfFloat', 0)
+                short_percent_raw = info.get('shortPercentOfFloat', 0)
+                short_percent = short_percent_raw
                 if isinstance(short_percent, float): short_percent = f"{short_percent*100:.2f}%"
                 
-                inst_own = info.get('heldPercentInstitutions', 0)
+                inst_own_raw = info.get('heldPercentInstitutions', 0)
+                inst_own = inst_own_raw
                 if isinstance(inst_own, float): inst_own = f"{inst_own*100:.2f}%"
                 
                 insider_own = info.get('heldPercentInsiders', 0)
@@ -60,6 +63,21 @@ class AdvancedDataFetcher:
                     f"- **수익성/배당**: 순이익률 {profit_margin} | ROE {roe} | 배당수익률 {dividend_yield}\n"
                     f"- **수급/내부자/공매도**: 기관보유율 {inst_own} | 내부자보유율 {insider_own} | 공매도 잔고율 {short_percent} (Short Ratio: {short_ratio})\n"
                 )
+
+                anomaly_flags = []
+                if isinstance(dividend_yield_raw, (int, float)) and dividend_yield_raw > 0.30:
+                    anomaly_flags.append(f"배당수익률 원천값({dividend_yield_raw*100:.2f}%)이 비정상적으로 높아 데이터 오염 가능성")
+                if isinstance(trailing_pe, (int, float)) and trailing_pe > 1000:
+                    anomaly_flags.append(f"Trailing PER {trailing_pe}배로 극단치 영역")
+                if isinstance(inst_own_raw, (int, float)) and inst_own_raw > 1.05:
+                    anomaly_flags.append(f"기관보유율 원천값({inst_own_raw*100:.2f}%)이 100%를 초과해 해석 주의 필요")
+                if isinstance(short_percent_raw, (int, float)) and short_percent_raw > 0.30:
+                    anomaly_flags.append(f"공매도 잔고율 원천값({short_percent_raw*100:.2f}%)이 과도하게 높음")
+
+                if anomaly_flags:
+                    fund_text += "- **데이터 무결성/이상치 경고**:\n"
+                    for flag in anomaly_flags:
+                        fund_text += f"  - ⚠️ {flag}\n"
 
                 # 4. 차트 및 기술적 지표 (최근 6개월 일봉 데이터)
                 hist = stock.history(period="6mo")

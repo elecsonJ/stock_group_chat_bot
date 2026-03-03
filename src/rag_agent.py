@@ -1,7 +1,6 @@
-import json
-import re
 from db_manager import DBManager
 from llm_client import LLMClientManager
+from json_utils import parse_json_object
 
 class RAGAgent:
     def __init__(self, llm_manager: LLMClientManager):
@@ -26,58 +25,83 @@ class RAGAgent:
         
         keywords = []
         try:
-            match = re.search(r'\{.*\}', extract_res, flags=re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(0))
-                keywords = parsed.get("keywords", [])
+            parsed = parse_json_object(extract_res) or {}
+            raw_keywords = parsed.get("keywords", [])
+            if isinstance(raw_keywords, list):
+                keywords = [str(k).strip() for k in raw_keywords if str(k).strip()]
         except Exception:
-            # 파싱 실패 시 띄어쓰기로 분리된 단어들 중 길이가 2 이상인 것만 임의로 사용
             keywords = [w for w in user_question.split() if len(w) >= 2][:3]
 
         if not keywords:
             keywords = [w for w in user_question.split() if len(w) >= 2][:3]
+        search_keyword_str = ", ".join(keywords) if keywords else user_question
 
         print(f"[RAG] 추출된 검색 키워드: {keywords}")
 
-        # 2. SQLite를 이용한 키워드 기반 매칭 (Lexical Search)
-        # 여러 키워드 중 하나라도 포함된 토론 기록(investment_json, topic) 조회
+        def _build_fts_query(tokens: list[str]) -> str:
+            clauses = []
+            for token in tokens:
+                tk = (token or "").strip().replace('"', ' ')
+                if not tk:
+                    continue
+                if " " in tk:
+                    clauses.append(f'"{tk}"')
+                else:
+                    clauses.append(tk)
+            return " OR ".join(clauses[:6])
+
+        # 2. SQLite 매칭: FTS 우선, 실패 시 LIKE fallback
         retrieved_contexts = []
-        
-        for kw in keywords:
-            kw_like = f"%{kw}%"
-            # 최근 10개의 관련 토론 추출
-            self.db.cursor.execute(
-                "SELECT date, topic, investment_json FROM debates WHERE topic LIKE ? OR investment_json LIKE ? ORDER BY id DESC LIMIT 10", 
-                (kw_like, kw_like)
-            )
-            rows = self.db.cursor.fetchall()
-            for r in rows:
-                date, topic, inv_json = r
+
+        fts_query = _build_fts_query(keywords)
+        if fts_query:
+            debate_rows = self.db.search_debates_fts(fts_query, limit=10)
+            for row in debate_rows:
+                date, topic, inv_json, _full_log = row
                 context_str = f"[{date}] 토론 주제: {topic}\n[토론 결과 및 판결문]: {inv_json}"
                 if context_str not in retrieved_contexts:
                     retrieved_contexts.append(context_str)
 
-        for kw in keywords:
-            kw_like = f"%{kw}%"
-            # 최근 10개의 관련 일/주/월간 요약 추출
-            self.db.cursor.execute(
-                "SELECT target_date, summary_type, summary_text FROM summaries WHERE summary_text LIKE ? OR keywords LIKE ? ORDER BY id DESC LIMIT 10", 
-                (kw_like, kw_like)
-            )
-            rows = self.db.cursor.fetchall()
-            for r in rows:
-                target_date, sum_type, text = r
+            summary_rows = self.db.search_summaries_fts(fts_query, limit=10)
+            for row in summary_rows:
+                target_date, sum_type, text = row
                 context_str = f"[{target_date} {sum_type} 요약]: {text}"
                 if context_str not in retrieved_contexts:
                     retrieved_contexts.append(context_str)
+
+        # FTS 결과가 부족하면 LIKE fallback
+        if len(retrieved_contexts) < 3:
+            for kw in keywords:
+                kw_like = f"%{kw}%"
+                self.db.cursor.execute(
+                    "SELECT date, topic, investment_json FROM debates WHERE topic LIKE ? OR investment_json LIKE ? ORDER BY id DESC LIMIT 10",
+                    (kw_like, kw_like),
+                )
+                rows = self.db.cursor.fetchall()
+                for r in rows:
+                    date, topic, inv_json = r
+                    context_str = f"[{date}] 토론 주제: {topic}\n[토론 결과 및 판결문]: {inv_json}"
+                    if context_str not in retrieved_contexts:
+                        retrieved_contexts.append(context_str)
+
+            for kw in keywords:
+                kw_like = f"%{kw}%"
+                self.db.cursor.execute(
+                    "SELECT target_date, summary_type, summary_text FROM summaries WHERE summary_text LIKE ? OR keywords LIKE ? ORDER BY id DESC LIMIT 10",
+                    (kw_like, kw_like),
+                )
+                rows = self.db.cursor.fetchall()
+                for r in rows:
+                    target_date, sum_type, text = r
+                    context_str = f"[{target_date} {sum_type} 요약]: {text}"
+                    if context_str not in retrieved_contexts:
+                        retrieved_contexts.append(context_str)
 
         # 3. 검색된 맥락 최적화 및 토큰 엄격 통제 (최대 5개, 각각 핵심만 자름)
         retrieved_contexts = retrieved_contexts[:5]
         
         if not retrieved_contexts:
             return f"🤔 DB 기록 탐색 완료: 제공하신 '{search_keyword_str}' 키워드와 일치하는 과거 토론이나 요약 데이터가 없습니다."
-
-        search_keyword_str = ", ".join(keywords)
         
         # 각 맥락의 길이를 800자로 제한하여 컨텍스트 윈도우 초과 방지
         truncated_contexts = []

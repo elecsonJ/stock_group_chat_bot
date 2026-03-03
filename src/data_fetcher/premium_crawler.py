@@ -31,7 +31,20 @@ class PremiumCrawler:
         )
         
         # 쿠키 파일 읽어와서 주입하기
-        cookie_file = os.path.join(os.path.dirname(__file__), "cookies.json")
+        cookie_file = os.getenv("PREMIUM_COOKIES_PATH", "").strip()
+        if not cookie_file:
+            cookie_file = os.path.join(os.path.dirname(__file__), "cookies.local.json")
+        if not os.path.isabs(cookie_file):
+            cookie_file = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                cookie_file
+            )
+
+        # 하위 호환: 과거 경로에 파일이 있을 때만 임시 사용
+        legacy_cookie_file = os.path.join(os.path.dirname(__file__), "cookies.json")
+        if not os.path.exists(cookie_file) and os.path.exists(legacy_cookie_file):
+            cookie_file = legacy_cookie_file
+
         if os.path.exists(cookie_file):
             import json
             with open(cookie_file, "r", encoding="utf-8") as f:

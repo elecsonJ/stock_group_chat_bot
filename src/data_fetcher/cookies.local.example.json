@@ -1,0 +1,11 @@
+[
+  {
+    "domain": ".example.com",
+    "name": "session_cookie_name",
+    "value": "replace_me",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "Lax"
+  }
+]

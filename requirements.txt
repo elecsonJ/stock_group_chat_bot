@@ -8,3 +8,5 @@ python-dotenv
 beautifulsoup4
 requests
 pandas_ta
+duckduckgo-search
+playwright

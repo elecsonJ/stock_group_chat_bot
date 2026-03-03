@@ -1,64 +1,57 @@
-# AI 투자 봇 데이터베이스 구조 및 저장 체계 가이드
+# 데이터 스키마 및 추적 가이드 (Current)
 
-이 문서는 봇이 수집한 주식 데이터, 딥 리서치 원문, 속마음(CoT)이 포함된 치열한 토론 내역, 그리고 사후 일반 채팅들이 **어떻게 저장되고 요약되는지**를 로컬 에이전트와 유저가 직관적으로 파악할 수 있도록 작성된 이정표입니다.
-
-## 📂 파일 시스템 구조 (Physical Layer)
-모든 데이터는 프로젝트 루트 디렉토리 산하 `data/` 폴더 내에 저장됩니다.
+## 파일 경로
+프로젝트 루트 기준:
 
 ```text
-c:/Users/gkswo/my_projects/ai_group_chat_bot/
+/Users/hanjaehoon/my_projects/stock_group_chat_bot/
 └── data/
-    ├── investment_bot.db      <-- (핵심) SQLite 관계형 데이터베이스 파일
-    ├── my_portfolio.md        <-- 사용자의 수동 입력 포트폴리오 (자산 현황)
-    └── (향후 RAG 인덱스 등 추가 문서가 이곳에 적재될 수 있습니다)
+    └── investment_bot.db
 ```
 
----
+## SQLite 테이블
+현재 기본 테이블은 4개(+FTS 가상 테이블)입니다.
 
-## 💾 SQLite 데이터베이스 내부 구조 (Logical Layer)
+1. `daily_news`
+- 날짜/키워드 기반 단기 뉴스 캐시
+- 현재 핵심 명령 경로에서는 파일 아카이브(`news_archive`)를 주로 사용하고, 이 테이블은 보조 캐시 역할
 
-`investment_bot.db` 내부에는 총 3개의 테이블이 계층적으로 구성되어 있습니다. 로컬 모델이 과거의 기억을 꺼내 쓸 때(RAG) 이 테이블의 관계성을 이해하고 접근해야 합니다.
+2. `debates`
+- 토론 주제, 전체 로그, 합치 여부, 최종 판결 JSON 저장
+- 일반 채팅 후속 로그도 append됨
 
-### 1. `daily_news` 테이블 (당일 컨텍스트 캐싱)
-- **목적**: 봇이 매 대화마다 똑같은 검색을 반복하여 토큰과 시간을 낭비하는 것을 막습니다. 
-- **작동 방식**: 백그라운드에서 동작하는 `scraper_job.py` (Windows Task Scheduler 기반 `run_news.bat`으로 구동)가 새벽마다 미리 뉴스를 스크래핑하여 아카이브에 적재하고 이 테이블을 업데이트합니다. 디스코드에서 `!뉴스`를 치면 이 텍스트들을 즉시 읽어올 수 있습니다.
-- **Column 층위**:
-  - `date` (TEXT): YYYY-MM-DD 포맷 (예: 2026-03-01)
-  - `keyword` (TEXT): 검색 키워드 (예: 엔비디아)
-  - `news_data` (TEXT/JSON): 해당 날짜에 크롤링한 뉴스 기사의 원문 및 요약본 데이터.
+3. `summaries`
+- 일/주/월 요약 저장
+- RAG에서 장문 로그를 압축해 재사용할 때 사용
 
-### 2. `debates` 테이블 (영구 보존되는 토론 및 사고 과정의 결합체)
-- **목적**: `!토론` 명령어로 시작된 3라운드의 발언, 속마음(CoT), 딥 리서치 스크래핑 결과, 그리고 **토론이 끝난 후 유저가 단답형으로 물어본 후속 채팅 내역까지 전부 이어진 하나의 거대한 회의록(Log)**을 영구 보존합니다.
-- **Column 층위**:
-  - `id` (INTEGER - PK): 토론 고유 번호 (이 번호를 기준으로 후속 대화가 이어붙여짐)
-  - `date` (TEXT): 토론 날짜
-  - `topic` (TEXT): 사용자가 던진 초기 화제
-  - `full_log` (TEXT): **[가장 중요]** 아래의 내용이 시간순으로 누적된 텍스트 덩어리
-    - `[요청:주식데이터]` 로 가져온 재무 수치
-    - `[요청:웹검색]` 으로 파이썬이 긁어온 수천 글자의 <심층 리서치 레포트> 원문
-    - AI들의 `<thought> ... </thought>` (속마음 사고 사슬)
-    - 로컬 20B 팩트체커의 검증 코멘트
-    - **유저와의 후속 일반 대화 내역(`update_debate_log` 메서드로 실시간 Append 됨)**
-  - `consensus_status` (TEXT): '합치' 또는 '불합치' 여부
-  - `investment_json` (TEXT/JSON): 로컬 20B 판사가 도출한 판결문(확률, 투자 형태 등)
+4. `research_evidences`
+- `[SEARCH: ...]` 실행 결과의 Evidence 패키지 저장
+- URL/도메인/발췌/제약/요약이 JSON으로 보관됨
+- 세션 전역 근거ID(`EV0001` 등)가 evidence 항목에 포함됨
 
-### 3. `summaries` 테이블 (RAG를 위한 압축된 기억)
-- **목적**: `debates` 테이블의 `full_log`가 수십만 자로 비대해지면, 나중에 로컬 모델이 과거의 기억을 찾을 때(RAG) 컨텍스트 한도(Token Limit)가 터집니다. 이를 방지하기 위해 `summaries.py`가 주기적으로 구동되어 원본 로그를 압축한 요약본을 이곳에 저장합니다.
-- **Column 층위**:
-  - `summary_type` (TEXT): `daily`(일간), `weekly`(주간), `monthly`(월간) 계층 분류
-  - `target_date` (TEXT): 요약 대상이 된 기준 시점
-  - `keywords` (TEXT): 요약을 대표하는 태그 (예: #금리인하 #HBM #엔비디아)
-  - `summary_text` (TEXT): 로컬 20B 모델이 `debates`의 방대한 코퍼스(Corpus)를 읽고 정제해 낸 "행동 기반 투자 인사이트 및 과거의 실패/성공 복기 기록"
+5. `debates_fts`, `summaries_fts` (FTS5 virtual table)
+- `debates`, `summaries`의 전문 검색 인덱스
+- 트리거 기반 동기화(`INSERT/UPDATE/DELETE`)
 
----
+## 운영 설정
+`DBManager`는 다음을 적용합니다.
+1. `WAL` 모드
+2. `busy_timeout=20000`
+3. 조회 인덱스(`date`, `summary_type`, `topic` 등)
+4. 보존 정책 purge(`daily_news`, `research_evidences`) 기본 180일
 
-## 🔍 로컬 모델의 '기억 인출(Hybrid RAG)' 프로세스 이정표
+## RAG 동작 메모
+현재 RAG 조회 방식은 **FTS 우선 + LIKE fallback** 입니다.
 
-나중에 질문자님이 *"3월 초에 너네들이 애플 공매도 치라고 합의했던 거 기억나? 그때 논리가 뭐였지?"* 라고 물어보면, 시스템(`rag_agent.py`)은 다음의 하이브리드 RAG 순서로 추론을 진행합니다:
+1. 질문에서 키워드 추출
+2. `debates_fts`/`summaries_fts` MATCH 검색
+3. 결과가 부족하면 `LIKE`로 fallback
+4. 최대 5개 맥락, 각 800자 절단
+5. 로컬 모델이 컨텍스트 범위 내 응답
 
-1. **(쿼리 최적화)**: 로컬 모델이 주어진 질문에서 불필요한 서술어를 날리고 `["애플", "공매도"]` 핵심 토큰 키워드만 추출합니다.
-2. **(Lexical Search)**: `sqlite3`의 Full-Text 조회 기능을 통해 `debates` 와 `summaries` 테이블의 원문에서 해당 키워드가 포함된 과거 판결 덩어리들을 최대 5개 가져옵니다.
-3. **(맥락 필터링)**: 토큰 폭발을 막기 위해 각 맥락을 800자로 자릅니다(`Truncation`).
-4. **(환각 차단 답변)**: 로컬 20B 판사 모델이 [이 맥락에 없는 내용은 지어내지 말라]는 강력한 규칙 하에 과거의 기억을 디스코드에 일목요연하게 출력합니다.
+## 감사/재현 포인트
+재현 가능한 판정을 위해 아래를 같이 보관합니다.
 
-> **💡 요약 가이드**: 이 `data` 레포지토리는 단순 텍스트 백업 파일이 아닙니다. 로컬 에이전트가 "단기 기억(`daily_news`)"을 취합하여 "장기 기억(`debates`)"으로 만들고, 이를 "지혜(`summaries`)"로 승화시키는 "수직적 지식 저장소" 역할을 수행합니다. 사용자는 언제든 **`!질문`** 커맨드를 통해 이 정제된 지혜를 열람할 수 있습니다.
+1. `debates.full_log`: 토론 맥락
+2. `research_evidences.evidence_json`: 검색 근거 패키지
+3. `debates.investment_json`: 최종 판결 JSON

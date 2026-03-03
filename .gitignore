@@ -15,6 +15,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.DS_Store
 *.swp
 *.swo
 *.tmp
@@ -23,4 +24,6 @@ ENV/
 chrome_data/
 data/
 news_archive/
+data_sources/
 src/data_fetcher/cookies.json
+src/data_fetcher/cookies.local.json

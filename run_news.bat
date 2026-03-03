@@ -1,2 +1,4 @@
 @echo off
-python src/scraper_job.py
+setlocal
+cd /d "%~dp0"
+python src\scraper_job.py

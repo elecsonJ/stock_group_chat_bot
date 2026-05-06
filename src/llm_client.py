@@ -24,7 +24,22 @@ class LLMClientManager:
             "claude": "claude-sonnet-4-6", # 2026 실제 지원 API Endpoint
             "gemini_primary": os.getenv("GEMINI_PRIMARY_MODEL", "gemini-3.1-pro-preview"),
             "gemini_fallback": os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3-flash-preview"),
-            "local": "gpt-oss:20b" # 16GB VRAM 환경의 최고 속도/지능 토론 판사
+            "local": os.getenv("LOCAL_MODEL_NAME", "gpt-oss:20b")
+        }
+        self.local_backend = os.getenv("LOCAL_MODEL_BACKEND", "ollama").strip().lower()
+        self.local_timeout_sec = max(30, int(os.getenv("LOCAL_TIMEOUT_SEC", "600")))
+        self.local_api_key = os.getenv("LOCAL_API_KEY", "lm-studio")
+        self.local_openai_base_url = os.getenv("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/")
+        self.local_ollama_url = os.getenv("LOCAL_OLLAMA_URL", "http://localhost:11434/api/chat")
+        self.local_max_output_tokens = max(256, int(os.getenv("LOCAL_MAX_OUTPUT_TOKENS", "2048")))
+        self.local_context_budgets = {
+            "default": max(2000, int(os.getenv("LOCAL_CONTEXT_BUDGET_DEFAULT", "9000"))),
+            "json": max(800, int(os.getenv("LOCAL_CONTEXT_BUDGET_JSON", "2000"))),
+            "extract": max(800, int(os.getenv("LOCAL_CONTEXT_BUDGET_EXTRACT", "2500"))),
+            "summary": max(2000, int(os.getenv("LOCAL_CONTEXT_BUDGET_SUMMARY", "12000"))),
+            "rag_answer": max(4000, int(os.getenv("LOCAL_CONTEXT_BUDGET_RAG", "16000"))),
+            "judge": max(4000, int(os.getenv("LOCAL_CONTEXT_BUDGET_JUDGE", "18000"))),
+            "evidence": max(2000, int(os.getenv("LOCAL_CONTEXT_BUDGET_EVIDENCE", "10000"))),
         }
         self.gemini_primary_retries = max(1, int(os.getenv("GEMINI_PRIMARY_RETRIES", "2")))
         self.gemini_fallback_retries = max(1, int(os.getenv("GEMINI_FALLBACK_RETRIES", "2")))
@@ -37,6 +52,10 @@ class LLMClientManager:
             "gemini": {"failures": 0, "open_until": 0.0},
             "local": {"failures": 0, "open_until": 0.0},
         }
+        self.local_openai_client = AsyncOpenAI(
+            api_key=self.local_api_key,
+            base_url=self.local_openai_base_url,
+        )
 
     def _is_circuit_open(self, key: str) -> tuple[bool, int]:
         state = self._circuit_state.get(key, {"open_until": 0.0})
@@ -56,6 +75,32 @@ class LLMClientManager:
         if state["failures"] >= self.circuit_failure_threshold:
             state["open_until"] = monotonic() + float(self.circuit_cooldown_sec)
             state["failures"] = 0
+
+    def fit_text_to_budget(self, text: str, max_chars: int) -> str:
+        raw = str(text or "")
+        if max_chars <= 0 or len(raw) <= max_chars:
+            return raw
+        marker = "\n...[middle truncated for local budget]...\n"
+        if max_chars <= len(marker) + 20:
+            return raw[:max_chars]
+        head = int((max_chars - len(marker)) * 0.7)
+        tail = max_chars - len(marker) - head
+        return raw[:head] + marker + raw[-tail:]
+
+    def prepare_local_payload(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        profile: str = "default",
+        max_input_chars: int | None = None,
+    ) -> tuple[str, str]:
+        sys_prompt = str(system_prompt or "")
+        usr_prompt = str(user_prompt or "")
+        budget = max_input_chars or self.local_context_budgets.get(profile, self.local_context_budgets["default"])
+        trimmed_user = self.fit_text_to_budget(usr_prompt, budget)
+        if "json" not in sys_prompt.lower() and "출력기" not in sys_prompt:
+            sys_prompt += "\n반드시 한국어(Korean)로 대답해."
+        return sys_prompt, trimmed_user
 
     async def get_gpt_response(self, system_prompt: str, user_prompt: str) -> str:
         import asyncio
@@ -170,23 +215,46 @@ class LLMClientManager:
         self._record_failure("gemini")
         return f"Error from Gemini: primary/fallback 모두 실패 ({'; '.join(merged[:6])})"
             
-    async def get_local_response(self, system_prompt: str, user_prompt: str) -> str:
+    async def get_local_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        profile: str = "default",
+        max_input_chars: int | None = None,
+    ) -> str:
         """
-        Ollama 등에 띄워진 로컬 모델을 호출하는 간단한 REST API 인터페이스
+        로컬 모델(Ollama 또는 OpenAI-compatible local server)을 호출합니다.
         """
         is_open, remain = self._is_circuit_open("local")
         if is_open:
             raise RuntimeError(f"Error connecting to local model: CircuitOpen ({remain}s)")
-        # 만약 .env에 과거 generate url이 있다면 강제로 chat url로 변환합니다.
-        local_url = os.getenv("LOCAL_OLLAMA_URL", "http://localhost:11434/api/chat")
-        if "api/generate" in local_url:
-            local_url = local_url.replace("api/generate", "api/chat")
-            
-        if "json" not in system_prompt.lower() and "출력기" not in system_prompt:
-            system_prompt += "\n반드시 한국어(Korean)로 대답해."
-            
+        system_prompt, user_prompt = self.prepare_local_payload(
+            system_prompt,
+            user_prompt,
+            profile=profile,
+            max_input_chars=max_input_chars,
+        )
+
         try:
-            async with httpx.AsyncClient(timeout=600.0) as client:
+            if self.local_backend == "openai_compatible":
+                response = await self.local_openai_client.chat.completions.create(
+                    model=self.models["local"],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=self.local_max_output_tokens,
+                    timeout=float(self.local_timeout_sec),
+                )
+                ans = response.choices[0].message.content or ""
+                ans = re.sub(r'<think>.*?</think>', '', ans, flags=re.DOTALL).strip()
+                self._record_success("local")
+                return ans
+
+            local_url = self.local_ollama_url
+            if "api/generate" in local_url:
+                local_url = local_url.replace("api/generate", "api/chat")
+            async with httpx.AsyncClient(timeout=float(self.local_timeout_sec)) as client:
                 payload = {
                     "model": self.models["local"],
                     "messages": [
@@ -201,11 +269,10 @@ class LLMClientManager:
                     ans = re.sub(r'<think>.*?</think>', '', ans, flags=re.DOTALL).strip()
                     self._record_success("local")
                     return ans
-                else:
-                    raise RuntimeError(f"Local Model Error: HTTP {response.status_code}\n{response.text}")
+                raise RuntimeError(f"Local Model Error: HTTP {response.status_code}\n{response.text}")
         except httpx.TimeoutException:
             self._record_failure("local")
-            raise RuntimeError("Error connecting to local model: Timeout (600 seconds exceeded)")
+            raise RuntimeError(f"Error connecting to local model: Timeout ({self.local_timeout_sec} seconds exceeded)")
         except Exception as e:
             self._record_failure("local")
             raise RuntimeError(f"Error connecting to local model: {str(e)}")

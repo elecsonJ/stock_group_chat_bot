@@ -51,7 +51,7 @@ class NewsSentimentFetcher:
         )
         
         try:
-            summary_report = await self.llm.get_local_response(sys_prompt, raw_news_corpus)
+            summary_report = await self.llm.get_local_response(sys_prompt, raw_news_corpus, profile="summary")
             final_text = (
                 f"**[📰 종목: {keyword} 대규모 뉴스 분석 결과]**\n"
                 f"{summary_report}\n"

@@ -25,8 +25,10 @@ async def run_scraper():
         else:
             await crawler.execute_daily_scrape()
             print("✅ 10분 폴링 뉴스 스크래핑이 성공적으로 완료되었습니다.")
+        return 0
     except Exception as e:
         print(f"❌ 뉴스 스크래핑 중 오류 발생: {e}")
+        return 1
 
 if __name__ == "__main__":
-    asyncio.run(run_scraper())
+    raise SystemExit(asyncio.run(run_scraper()))

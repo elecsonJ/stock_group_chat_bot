@@ -18,11 +18,13 @@
 2. 로컬 모델이 정상인 경우 RAG를 통해 과거 토론 맥락을 주입합니다.
 3. 로컬 모델 장애 시 RAG는 건너뛰고 휴리스틱 추출기로 대체합니다.
 4. `!포트폴리오` 또는 `data/my_portfolio.md`가 있으면 사용자 포트폴리오 컨텍스트를 토론에 주입합니다.
+5. 최신 이슈로 판정되면 `NewsContextPackService`가 최근 뉴스 이벤트/기사/웹검증 evidence를 독립 Context Pack으로 만들어 토론에 주입합니다.
 
 ### Step 1: Fact-Sheet 구성
 1. 온톨로지 플랜 결과 + LLM 추출 결과를 병합해 ticker/search 목록을 구성합니다.
 2. 마스터 파이프라인이 거시/주가/뉴스 요약 데이터를 수집해 공통 Fact-Sheet를 만듭니다.
-3. 이상치(배당률, PER, 기관보유율 등)는 경고 플래그로 표시됩니다.
+3. News Context Pack의 `state`, `web_required`, `limitations`는 Fact-Sheet와 별개로 토론 히스토리에 명시됩니다.
+4. 이상치(배당률, PER, 기관보유율 등)는 경고 플래그로 표시됩니다.
 
 ### Step 2: 토론 라운드
 1. Loop 1은 블라인드 병렬 발언입니다.
@@ -48,7 +50,8 @@
 ## 출력/저장
 1. 토론 로그는 `debates.full_log`에 저장됩니다.
 2. Evidence 패키지는 `research_evidences`에 저장됩니다.
-3. 요약은 `summaries`에 일/주/월 단위로 저장됩니다.
+3. News Context Pack은 `news_context_packs`에 저장됩니다.
+4. 요약은 `summaries`에 일/주/월 단위로 저장됩니다.
 
 ## 구현 파일 매핑
 1. 오케스트레이션: `src/debate_manager.py`
@@ -57,3 +60,4 @@
 4. DB 스키마: `src/db_manager.py`
 5. 온톨로지 플래너: `src/ontology/planner.py`
 6. 온톨로지 관계추출기: `src/ontology/relation_miner.py`
+7. 뉴스 Context Pack: `src/news_context_pack.py`

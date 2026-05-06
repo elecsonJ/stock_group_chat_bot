@@ -6,8 +6,11 @@ import httpx
 import yfinance as yf
 from typing import List, Dict, Any
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 import json
+from data_fetcher.dart_official import DARTOfficialFetcher
+from data_fetcher.krx_kind_official import KRXKindOfficialChecker
+from data_fetcher.sec_official import SECOfficialFetcher
 
 class FactCheckAgent:
     def __init__(self, llm_manager):
@@ -18,9 +21,26 @@ class FactCheckAgent:
         """
         self.ddgs = DDGS()
         self.llm_manager = llm_manager
+        self.dart_fetcher = DARTOfficialFetcher()
+        self.krx_kind_checker = KRXKindOfficialChecker()
+        self.sec_fetcher = SECOfficialFetcher()
         self.max_results = 5
         self.fetch_concurrency = max(1, int(os.getenv("WEB_FETCH_CONCURRENCY", "4")))
         self.fetch_timeout_sec = max(5, int(os.getenv("WEB_FETCH_TIMEOUT_SEC", "10")))
+        self.official_domains = {
+            "sec.gov", "www.sec.gov", "federalreserve.gov", "www.federalreserve.gov",
+            "investor.nvidia.com", "ir.tesla.com", "investor.apple.com", "www.apple.com",
+        }
+        self.company_ir_domains = {
+            "investor.nvidia.com", "ir.tesla.com", "investor.apple.com", "investor.microsoft.com",
+            "investor.amd.com", "investor.broadcom.com",
+        }
+        self.trusted_domains = {
+            "reuters.com", "www.reuters.com", "nytimes.com", "www.nytimes.com",
+            "bloomberg.com", "www.bloomberg.com", "wsj.com", "www.wsj.com",
+            "ft.com", "www.ft.com", "marketwatch.com", "www.marketwatch.com",
+            "cnbc.com", "www.cnbc.com", "finance.yahoo.com",
+        }
 
     async def _extract_search_queries(self, ai_statement: str) -> List[str]:
         """
@@ -36,7 +56,7 @@ class FactCheckAgent:
         )
         # 로컬 모델(gpt-oss-20b)에게 추출을 시킴
         try:
-            query = await self.llm_manager.get_local_response("너는 검색어 추출기야.", prompt)
+            query = await self.llm_manager.get_local_response("너는 검색어 추출기야.", prompt, profile="extract")
         except Exception:
             return []
         
@@ -54,10 +74,37 @@ class FactCheckAgent:
         try:
             search_results = self.ddgs.text(query, max_results=self.max_results)
             for r in search_results:
-                results.append({"title": r.get("title", ""), "href": r.get("href", ""), "body": r.get("body", "")})
-        except Exception as e:
+                href = self._normalize_url(r.get("href", ""))
+                title = (r.get("title", "") or "").strip()
+                body = (r.get("body", "") or "").strip()
+                if not href or not title:
+                    continue
+                results.append(
+                    {
+                        "title": title,
+                        "href": href,
+                        "body": body,
+                        "domain": self._safe_domain(href),
+                        "source_quality": self._domain_quality(href),
+                        "source_tier": self._domain_tier(href),
+                    }
+                )
+        except Exception:
             pass
-        return results
+        dedup = {}
+        for item in results:
+            key = item.get("href", "")
+            if not key:
+                continue
+            prev = dedup.get(key)
+            if prev is None or item.get("source_quality", 0) > prev.get("source_quality", 0):
+                dedup[key] = item
+        ranked = sorted(
+            dedup.values(),
+            key=lambda x: (int(x.get("source_quality", 0)), len(str(x.get("body", "")))),
+            reverse=True,
+        )
+        return ranked[: self.max_results]
 
     async def _search_web_async(self, query: str) -> List[Dict]:
         try:
@@ -71,8 +118,46 @@ class FactCheckAgent:
         except Exception:
             return ""
 
+    def _normalize_url(self, url: str) -> str:
+        try:
+            parsed = urlparse(str(url or "").strip())
+            query = []
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+                if key.lower().startswith("utm_"):
+                    continue
+                query.append((key, value))
+            parsed = parsed._replace(query=urlencode(query), fragment="")
+            return urlunparse(parsed)
+        except Exception:
+            return str(url or "").strip()
+
+    def _domain_quality(self, url: str) -> int:
+        domain = self._safe_domain(url)
+        if domain in self.official_domains or domain.endswith(".gov"):
+            return 4
+        if domain in self.company_ir_domains:
+            return 3
+        if domain in self.trusted_domains:
+            return 2
+        if domain:
+            return 1
+        return 0
+
+    def _domain_tier(self, url: str) -> str:
+        domain = self._safe_domain(url)
+        if domain in self.official_domains or domain.endswith(".gov"):
+            return "regulatory"
+        if domain in self.company_ir_domains:
+            return "company_ir"
+        if domain in self.trusted_domains:
+            return "tier1_media"
+        if domain:
+            return "secondary"
+        return "unknown"
+
     async def get_stock_data(self, ticker: str) -> str:
-        """yfinance를 통해 실시간 주가 및 재무 데이터를 가져옴"""
+        """공식 공시 데이터 우선 + yfinance 보조 시장 데이터를 가져옴."""
+        official_text = await self._get_official_company_text(ticker)
         try:
             def fetch_data():
                 stock = yf.Ticker(ticker)
@@ -80,18 +165,40 @@ class FactCheckAgent:
             info = await asyncio.to_thread(fetch_data)
             
             c_price = info.get("currentPrice") or info.get("regularMarketPrice", "N/A")
+            currency = info.get("currency") or info.get("financialCurrency") or "N/A"
             f_pe = info.get("forwardPE", "N/A")
             t_pe = info.get("trailingPE", "N/A")
             m_cap = info.get("marketCap", "N/A")
             high52 = info.get("fiftyTwoWeekHigh", "N/A")
             low52 = info.get("fiftyTwoWeekLow", "N/A")
             
-            return (f"[{ticker} 최신 주식 데이터]\n"
-                    f"현재가: {c_price}\n시가총액: {m_cap}\n"
-                    f"52주 최고/최저: {high52} / {low52}\n"
-                    f"Trailing PER: {t_pe} / Forward PER: {f_pe}")
+            market_text = (
+                f"[{ticker} 비공식 시장 데이터: yfinance/Yahoo Finance]\n"
+                f"주의: 공식 공시/브로커 호가가 아니므로 실제 투자 전 별도 확인 필요\n"
+                f"현재가: {c_price} {currency}\n시가총액: {m_cap} {currency}\n"
+                f"52주 최고/최저: {high52} / {low52}\n"
+                f"Trailing PER: {t_pe} / Forward PER: {f_pe}"
+            )
+            return f"{official_text}\n{market_text}"
         except Exception as e:
-            return f"{ticker} 주식 데이터 조회 실패: {str(e)}"
+            return f"{official_text}\n[{ticker} yfinance 보조 데이터 조회 실패: {str(e)}]"
+
+    async def _get_official_company_text(self, ticker: str) -> str:
+        sections = []
+        if self.sec_fetcher.is_supported_ticker(ticker):
+            sections.append(await asyncio.to_thread(self.sec_fetcher.render_official_fact_sheet, ticker))
+        if self.dart_fetcher.is_supported_ticker(ticker):
+            sections.append(await asyncio.to_thread(self.dart_fetcher.render_official_fact_sheet, ticker))
+        if self.krx_kind_checker.is_supported_ticker(ticker):
+            sections.append(self.krx_kind_checker.render_market_integrity_note(ticker))
+        if sections:
+            return "\n".join(sections)
+        label = str(ticker or "").strip().upper()
+        return (
+            f"**[공식 기업 데이터: {label}]**\n"
+            "- 현재 내장 공식 provider(SEC EDGAR/OpenDART)로 지원되지 않는 티커입니다.\n"
+            "- 실제 투자 전 해당 거래소, 감독기관 공시, 기업 IR, 브로커 원장을 별도 확인해야 합니다.\n"
+        )
 
     async def _fetch_page_text(self, client: httpx.AsyncClient, url: str) -> str:
         """URL에 접속해 본문 텍스트(BeautifulSoup)를 긁어옴"""
@@ -137,6 +244,8 @@ class FactCheckAgent:
                 "title": title,
                 "url": url,
                 "domain": self._safe_domain(url),
+                "source_quality": r.get("source_quality", 0),
+                "source_tier": r.get("source_tier", "unknown"),
                 "snippet": snippet[:300],
                 "excerpt": excerpt[:450],
                 "extraction_method": "ddgs.text + bs4(p tags)",
@@ -173,7 +282,7 @@ class FactCheckAgent:
         )
         summary_user_prompt = json.dumps(package, ensure_ascii=False, indent=2)
         try:
-            summary = await self.llm_manager.get_local_response(summary_system_prompt, summary_user_prompt)
+            summary = await self.llm_manager.get_local_response(summary_system_prompt, summary_user_prompt, profile="evidence")
             package["summary"] = summary
         except Exception:
             package["limitations"].append("로컬 모델 요약 생성 실패: raw evidence만 제공")
@@ -237,7 +346,7 @@ class FactCheckAgent:
         )
 
         try:
-            verification_result = await self.llm_manager.get_local_response(system_prompt, user_prompt)
+            verification_result = await self.llm_manager.get_local_response(system_prompt, user_prompt, profile="judge")
         except Exception as e:
             verification_result = f"로컬 Fact-Check 판독기 오류: {e}"
         

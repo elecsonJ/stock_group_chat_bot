@@ -1,4 +1,4 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-python src\summarizer.py daily
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\windows\run_task.ps1 -Job daily

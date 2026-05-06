@@ -152,12 +152,81 @@ def ingest_figi_csv(path: str, store: OntologyStore) -> int:
     return count
 
 
+def ingest_commonsense_json(path: str, store: OntologyStore) -> int:
+    """
+    예시 포맷:
+    {
+      "entities": [
+        {"entity_id":"concept:gold_rush","canonical_name":"Gold Rush","entity_type":"macro_event","aliases":["gold rush","광산붐"]},
+        {"entity_id":"company:levi","canonical_name":"Levi Strauss","entity_type":"company","ticker":"LEVI"}
+      ],
+      "relations": [
+        {"subject_id":"concept:gold_rush","predicate":"drives_demand_for","object_id":"activity:mining","confidence":0.9}
+      ]
+    }
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    count = 0
+    for row in data.get("entities", []):
+        if not isinstance(row, dict):
+            continue
+        entity_id = str(row.get("entity_id", "")).strip()
+        if not entity_id:
+            continue
+        store.upsert_entity(
+            {
+                "entity_id": entity_id,
+                "canonical_name": str(row.get("canonical_name", "")).strip(),
+                "entity_type": str(row.get("entity_type", "concept")).strip() or "concept",
+                "ticker": str(row.get("ticker", "")).strip() or None,
+                "exchange": str(row.get("exchange", "")).strip() or None,
+                "country": str(row.get("country", "")).strip() or None,
+                "sector": str(row.get("sector", "")).strip() or None,
+                "industry": str(row.get("industry", "")).strip() or None,
+                "source": "commonsense_json",
+            }
+        )
+        for alias in row.get("aliases", []) or []:
+            if alias:
+                store.add_alias(
+                    entity_id,
+                    str(alias).strip(),
+                    source="commonsense_json",
+                    confidence=0.9,
+                )
+        count += 1
+
+    rel_count = 0
+    for row in data.get("relations", []):
+        if not isinstance(row, dict):
+            continue
+        subject_id = str(row.get("subject_id", "")).strip()
+        predicate = str(row.get("predicate", "")).strip()
+        object_id = str(row.get("object_id", "")).strip()
+        if not subject_id or not predicate or not object_id:
+            continue
+        store.add_relation(
+            subject_id,
+            predicate,
+            object_id,
+            source="commonsense_json",
+            confidence=float(row.get("confidence", 0.8) or 0.8),
+        )
+        rel_count += 1
+
+    store.log_ingestion("commonsense_json", path, count + rel_count)
+    return count + rel_count
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ontology bootstrap loader")
     parser.add_argument("--sec-json", help="SEC company_tickers.json path")
     parser.add_argument("--dart-krx-csv", help="DART/KRX merged csv path")
     parser.add_argument("--lei-csv", help="GLEIF LEI csv path")
     parser.add_argument("--figi-csv", help="FIGI csv path")
+    parser.add_argument("--commonsense-json", help="commonsense ontology seed json path")
     args = parser.parse_args()
 
     store = OntologyStore()
@@ -182,6 +251,11 @@ def main():
         c = ingest_figi_csv(args.figi_csv, store)
         total += c
         print(f"[ingest] FIGI csv: {c}")
+
+    if args.commonsense_json and os.path.exists(args.commonsense_json):
+        c = ingest_commonsense_json(args.commonsense_json, store)
+        total += c
+        print(f"[ingest] commonsense json: {c}")
 
     print(f"[done] total ingested records: {total}")
 

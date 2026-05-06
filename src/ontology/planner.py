@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Any
 
@@ -15,6 +16,7 @@ class HybridResearchPlanner:
 
     def __init__(self, store: OntologyStore):
         self.store = store
+        self.hidden_candidate_min_score = max(0.0, float(os.getenv("ONTOLOGY_HIDDEN_MIN_SCORE", "0.45")))
 
     def _extract_candidates(self, user_query: str) -> list[str]:
         tokens = set()
@@ -148,6 +150,7 @@ class HybridResearchPlanner:
         rag_keywords = []
         web_queries = []
         expansion_nodes = []
+        linked_ids = []
 
         for ent in linked[:6]:
             name = (ent.get("canonical_name") or "").strip()
@@ -155,6 +158,7 @@ class HybridResearchPlanner:
             sector = (ent.get("sector") or "").strip()
             industry = (ent.get("industry") or "").strip()
             entity_id = ent.get("entity_id")
+            entity_type = (ent.get("entity_type") or "").strip()
 
             if ticker and ticker not in tickers:
                 tickers.append(ticker)
@@ -166,9 +170,16 @@ class HybridResearchPlanner:
                 rag_keywords.append(industry)
 
             if entity_id:
+                linked_ids.append(entity_id)
+                if entity_type == "company" and ticker:
+                    rag_keywords.append(ticker)
                 neighbors = self.store.get_neighbors(
                     entity_id,
-                    predicates=["supplies_to", "customer_of", "competes_with", "belongs_to_supply_chain"],
+                    predicates=[
+                        "supplies_to", "customer_of", "competes_with", "belongs_to_supply_chain",
+                        "produces", "sells", "uses", "requires", "benefits_from",
+                        "drives_demand_for", "enables", "exposed_to",
+                    ],
                     limit=5,
                 )
                 for n in neighbors:
@@ -176,6 +187,24 @@ class HybridResearchPlanner:
                     pred = (n.get("predicate") or "").strip()
                     if obj_name:
                         expansion_nodes.append({"from": name, "predicate": pred, "to": obj_name})
+
+        hidden_candidates = self.store.discover_hidden_candidates(
+            linked_ids,
+            predicates=[
+                "supplies_to", "customer_of", "competes_with", "belongs_to_supply_chain",
+                "partners_with", "invests_in", "produces", "sells", "uses", "requires",
+                "benefits_from", "drives_demand_for", "enables", "exposed_to", "affected_by",
+            ],
+            max_depth=3,
+            per_hop_limit=10,
+            max_candidates=8,
+        )
+        hidden_candidates = [
+            c for c in hidden_candidates
+            if (c.get("ticker") or c.get("canonical_name"))
+            and (c.get("ticker") not in tickers)
+            and float(c.get("validation_score", 0.0) or 0.0) >= self.hidden_candidate_min_score
+        ]
 
         # 웹검색 쿼리 생성
         if linked:
@@ -186,6 +215,13 @@ class HybridResearchPlanner:
                     web_queries.append(f"{cname} recent earnings outlook risk")
         for x in expansion_nodes[:3]:
             web_queries.append(f"{x['from']} {x['predicate']} {x['to']} evidence")
+        for hc in hidden_candidates[:3]:
+            cname = (hc.get("canonical_name") or hc.get("ticker") or "").strip()
+            ticker = (hc.get("ticker") or "").strip()
+            if cname:
+                subject = f"{ticker} {cname}".strip() if ticker else cname
+                web_queries.append(f"{subject} why demand exposure catalyst risk")
+                web_queries.append(f"{subject} indirect beneficiary evidence")
 
         # unresolved 토큰은 잡음이 많아 일반화된 ticker profile 쿼리는 생성하지 않음
 
@@ -207,6 +243,15 @@ class HybridResearchPlanner:
 
         confidence = "high" if coverage >= 0.55 else ("medium" if coverage >= 0.25 else "low")
 
+        planner_tickers = []
+        for t in tickers:
+            if t and t not in planner_tickers:
+                planner_tickers.append(t)
+        for c in hidden_candidates:
+            t = str(c.get("ticker") or "").strip()
+            if t and t not in planner_tickers:
+                planner_tickers.append(t)
+
         return {
             "mode": mode,
             "coverage": round(coverage, 3),
@@ -224,7 +269,25 @@ class HybridResearchPlanner:
             ],
             "unresolved_terms": unresolved[:8],
             "expansion_nodes": expansion_nodes[:8],
-            "tickers": tickers[:2],
+            "hidden_candidates": [
+                {
+                    "entity_id": c.get("entity_id"),
+                    "name": c.get("canonical_name"),
+                    "ticker": c.get("ticker"),
+                    "path_score": c.get("path_score"),
+                    "validation_score": c.get("validation_score"),
+                    "validation_flags": c.get("validation_flags", []),
+                    "path": [
+                        {
+                            "predicate": p.get("predicate"),
+                            "direction": p.get("direction"),
+                        }
+                        for p in (c.get("path") or [])[:3]
+                    ],
+                }
+                for c in hidden_candidates[:6]
+            ],
+            "tickers": planner_tickers[:3],
             "rag_keywords": rag_keywords[:8],
             "web_queries": web_queries,
         }

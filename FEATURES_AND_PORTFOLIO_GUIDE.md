@@ -53,6 +53,19 @@
 - DB(`news_articles`, `news_events`) + 파일(`news_archive/*.txt`, `*.json`) 동시 저장
 - 구현 파일: `src/data_fetcher/premium_crawler.py`, `src/db_manager.py`
 
+10. 독립 News Context Pack
+- 그룹챗/토론 모델과 별개로 뉴스 이벤트, 관련 기사, 누적 웹검증 evidence를 판단 패키지로 정리
+- 품질 상태(`strong/usable/weak/empty`), `web_required`, source tier, 보완 검색어를 제공
+- `run_news_context.bat`로 디스코드 봇 없이 수동/스케줄러 실행 가능
+- 구현 파일: `src/news_context_pack.py`, `src/news_context_job.py`, `src/db_manager.py`, `src/debate_manager.py`, `src/rag_agent.py`
+
+11. 승인형 단기 시그널/페이퍼 체결
+- `!시그널`로 신규 뉴스 이벤트를 점수화하고 웹검색 증거 패키지로 검증 후 승인 대기 생성
+- `!승인목록`, `!시그널상세 [EVENT_ID]`, `!승인 [EVENT_ID]`, `!거부 [EVENT_ID]`
+- `!자동매매중지`, `!자동매매재개`, `!가드레일`로 실행 회로차단/한도 관리
+- 승인 전에는 주문 미실행, 승인 후 기본은 페이퍼 체결입니다. 현재 운영 원칙상 최종 투자 판단은 사용자가 100% 수행합니다.
+- 구현 파일: `src/signal_engine.py`, `src/trading_executor.py`, `src/main.py`, `src/db_manager.py`
+
 ## 2) 기술 스택
 1. 언어/런타임
 - Python 3.x
@@ -68,6 +81,7 @@
 - SQLite (`data/investment_bot.db`)
 - FTS5 인덱스 (`debates_fts`, `summaries_fts`)
 - Evidence 저장 테이블 (`research_evidences`)
+- 뉴스 판단 패키지 (`news_context_packs`)
 
 4. 시장/뉴스/수집
 - 가격/기초 데이터: `yfinance`
@@ -99,6 +113,24 @@
 5. `!포트변동`
 - 보유 종목 현재가 기준 PnL 스냅샷 출력
 - `yfinance` 미설치 시 안내 메시지 출력
+
+6. `!시그널`
+- 최신 뉴스 이벤트 점수화 + 승인 대기 시그널 생성
+
+7. `!시그널상세 [EVENT_ID]`
+- 이벤트 상세 점수, 주문 제안, 승인 상태 출력
+
+8. `!승인목록`
+- 현재 승인 대기 목록 출력
+
+9. `!승인 [EVENT_ID]`
+- 승인 후 즉시 페이퍼 체결 수행
+
+10. `!거부 [EVENT_ID]`
+- 승인 대기 이벤트 거부 및 상태 업데이트
+
+11. `!자동매매중지`, `!자동매매재개`, `!가드레일`
+- kill switch 및 주문 한도 상태 제어/조회
 
 ## 4) 포트폴리오 저장 방식
 1. 기본 파일 경로
@@ -141,5 +173,8 @@
 
 4. Windows 스케줄러
 - `run_news.bat` 10분 주기 등록
+- `run_news_context.bat` 30분 주기 등록
 - `run_news_backfill.bat` 하루 1회 등록
+- `run_signals.bat` 10~30분 주기 등록
+- `run_debates.bat`, `run_replay.bat`, `run_local_healthcheck.bat` 필요 시 등록
 - `run_daily.bat`, `run_weekly.bat`, `run_monthly.bat` 등록

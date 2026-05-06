@@ -1,9 +1,10 @@
 # 시스템 재가동 가이드 (Windows)
 
-## 1) Ollama 확인
-1. 트레이 아이콘에서 Ollama 실행 상태 확인
-2. 모델은 코드에서 `gpt-oss:20b`를 호출
-3. 로컬 URL 기본값: `http://localhost:11434/api/chat`
+## 1) 로컬 모델 런타임 확인
+1. Ollama 또는 LM Studio 실행 상태 확인
+2. 모델은 `.env`의 `LOCAL_MODEL_BACKEND`, `LOCAL_MODEL_NAME` 기준으로 호출
+3. Ollama 기본 URL: `http://localhost:11434/api/chat`
+4. LM Studio는 OpenAI-compatible endpoint(`LOCAL_OPENAI_BASE_URL`)가 켜져 있어야 함
 
 ## 2) 의존성 설치
 프로젝트 루트에서:
@@ -21,9 +22,11 @@ playwright install
 3. `ANTHROPIC_API_KEY`
 4. `GEMINI_API_KEY`
 5. `LOCAL_OLLAMA_URL` (기본값 사용 가능)
-6. `NYT_API_KEY` (뉴스 수집 시)
-7. `PREMIUM_COOKIES_PATH` (선택)
-8. `PORTFOLIO_FILE_PATH` (선택, 기본 `data/my_portfolio.md`)
+6. LM Studio 사용 시 `LOCAL_OPENAI_BASE_URL`, `LOCAL_API_KEY`
+7. `NYT_API_KEY` (뉴스 수집 시)
+8. `PREMIUM_COOKIES_PATH` (선택)
+9. `PORTFOLIO_FILE_PATH` (선택, 기본 `data/my_portfolio.md`)
+10. `NEWS_CONTEXT_QUERIES` (선택, 뉴스팩 수동 점검 쿼리)
 
 ## 4) 쿠키 파일 규칙
 1. 기본 경로: `src/data_fetcher/cookies.local.json`
@@ -42,20 +45,35 @@ python src/main.py
 배치 파일은 프로젝트 루트 상대경로로 동작합니다.
 
 1. `run_news.bat` (권장: 10분마다 실행)
-2. `run_news_backfill.bat` (권장: 하루 1회 실행, 늦게 색인된 기사 보정)
-3. `run_daily.bat`
-4. `run_weekly.bat`
-5. `run_monthly.bat`
+2. `run_news_context.bat` (권장: 30분마다 실행, 뉴스 Context Pack 생성)
+3. `run_news_backfill.bat` (권장: 하루 1회 실행, 늦게 색인된 기사 보정)
+4. `run_signals.bat` (권장: 10~30분마다 실행, 승인 대기 시그널 생성)
+5. `run_debates.bat` (권장: 10~15분마다 실행, 자동 토론 큐 소비)
+6. `run_replay.bat` (선택: 성과 재측정)
+7. `run_local_healthcheck.bat` (권장: 하루 1회)
+8. `run_daily.bat`
+9. `run_weekly.bat`
+10. `run_monthly.bat`
 
 예시(`관리자 CMD`):
 ```cmd
 schtasks /Create /TN "StockBot-News-Poll-10m" /TR "\"C:\path\to\stock_group_chat_bot\run_news.bat\"" /SC MINUTE /MO 10 /F
+schtasks /Create /TN "StockBot-News-Context-30m" /TR "\"C:\path\to\stock_group_chat_bot\run_news_context.bat\"" /SC MINUTE /MO 30 /F
 schtasks /Create /TN "StockBot-News-Backfill" /TR "\"C:\path\to\stock_group_chat_bot\run_news_backfill.bat\"" /SC DAILY /ST 02:10 /F
+schtasks /Create /TN "StockBot-Signals-10m" /TR "\"C:\path\to\stock_group_chat_bot\run_signals.bat\"" /SC MINUTE /MO 10 /F
+```
+
+권장 방식은 직접 `schtasks`를 입력하는 것보다 아래 등록 스크립트를 사용하는 것입니다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_scheduled_tasks.ps1
 ```
 
 ## 7) 장애 시
 1. 로컬 모델 장애면 강등 모드로 자동 전환됩니다.
-2. API 키 오류/의존성 누락 먼저 점검하세요.
+2. `run_local_healthcheck.bat`로 로컬 모델 프로파일 상태를 먼저 확인하세요.
+3. API 키 오류/의존성 누락 먼저 점검하세요.
+4. 최신 로그는 `logs/`에서 확인하세요.
 
 ## 8) 포트폴리오 초기 설정
 1. 기본 파일 생성: `data/my_portfolio.md`

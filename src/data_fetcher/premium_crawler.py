@@ -8,7 +8,10 @@ from collections import Counter
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-import requests
+try:
+    import requests
+except Exception:  # pragma: no cover
+    requests = None
 try:
     import feedparser
 except Exception:  # pragma: no cover
@@ -26,11 +29,11 @@ class PremiumCrawler:
     4) DB(news_articles/news_events) + 파일(txt/json) 동시 저장
     """
 
-    def __init__(self):
+    def __init__(self, db: DBManager | None = None, archive_dir: str | None = None):
         root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        self.news_archive_dir = os.path.join(root, "news_archive")
+        self.news_archive_dir = archive_dir or os.path.join(root, "news_archive")
         os.makedirs(self.news_archive_dir, exist_ok=True)
-        self.db = DBManager()
+        self.db = db or DBManager()
 
         self.max_per_source = max(5, int(os.getenv("NEWS_MAX_PER_SOURCE", "20")))
         self.max_events = max(5, int(os.getenv("NEWS_MAX_EVENTS", "25")))
@@ -47,6 +50,16 @@ class PremiumCrawler:
             "politics": "미국정치",
             "science": "과학",
             "health": "건강",
+        }
+        self.source_priority = {
+            "SEC-PressRelease": 5,
+            "FED-Press": 5,
+            "NYT": 4,
+            "Reuters-Markets": 4,
+            "Reuters-Business": 4,
+            "Reuters-Technology": 4,
+            "Reuters-World": 4,
+            "NYT-Search": 3,
         }
 
     def _canonicalize_url(self, raw_url: str) -> str:
@@ -69,6 +82,13 @@ class PremiumCrawler:
 
     def _hash(self, text: str) -> str:
         return hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+
+    def _article_rank(self, row: dict) -> tuple[int, str, int]:
+        return (
+            int(self.source_priority.get(str(row.get("source", "")).strip(), 1)),
+            str(row.get("published_at", "") or ""),
+            len(str(row.get("summary", "") or "")),
+        )
 
     def _normalize_text(self, text: str) -> str:
         t = re.sub(r"<[^>]+>", " ", text or "")
@@ -122,6 +142,55 @@ class PremiumCrawler:
         except Exception:
             return None
 
+    def _event_similarity(self, left: dict, right: dict) -> float:
+        left_tokens = set(self._tokenize(f"{left.get('title', '')} {left.get('summary', '')}")[:16])
+        right_tokens = set(self._tokenize(f"{right.get('title', '')} {right.get('summary', '')}")[:16])
+        if not left_tokens or not right_tokens:
+            return 0.0
+        inter = len(left_tokens & right_tokens)
+        union = len(left_tokens | right_tokens) or 1
+        sim = inter / union
+        if inter >= 3:
+            sim += 0.1
+        return sim
+
+    def _published_within_cluster_window(
+        self,
+        article_dt: datetime.datetime | None,
+        cluster_dt: datetime.datetime | None,
+        window_hours: int = 36,
+    ) -> bool:
+        if not article_dt or not cluster_dt:
+            return True
+        if article_dt.tzinfo is None:
+            article_dt = article_dt.replace(tzinfo=datetime.timezone.utc)
+        if cluster_dt.tzinfo is None:
+            cluster_dt = cluster_dt.replace(tzinfo=datetime.timezone.utc)
+        delta = abs((cluster_dt.astimezone(datetime.timezone.utc) - article_dt.astimezone(datetime.timezone.utc)).total_seconds())
+        return delta <= window_hours * 3600
+
+    def _align_with_existing_event_keys(self, events: list[dict]) -> list[dict]:
+        existing = self.db.get_latest_news_events(limit=200)
+        if not existing:
+            return events
+
+        for event in events:
+            new_dt = self._parse_dt(str(event.get("date", "") or ""))
+            best_match = None
+            best_score = 0.0
+            for old in existing:
+                old_dt = self._parse_dt(str(old.get("date", "") or ""))
+                if new_dt and old_dt:
+                    if abs((new_dt - old_dt).days) > 2:
+                        continue
+                score = self._event_similarity(event, old)
+                if score > best_score:
+                    best_score = score
+                    best_match = old
+            if best_match and best_score >= 0.42:
+                event["event_key"] = best_match.get("event_key", event.get("event_key"))
+        return events
+
     def _resolve_poll_window(self) -> tuple[datetime.datetime, datetime.datetime]:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         default_start = now_utc - datetime.timedelta(hours=self.backfill_hours)
@@ -161,13 +230,14 @@ class PremiumCrawler:
         raw_json: dict,
         fetched_at_utc: datetime.datetime | None = None,
         min_published_utc: datetime.datetime | None = None,
+        enforce_lookback: bool = False,
     ) -> dict | None:
         clean_title = self._normalize_text(title)
         clean_summary = self._normalize_text(summary)
         clean_url = self._canonicalize_url(url)
         if not clean_title or not clean_url:
             return None
-        if not self._in_lookback(published_dt):
+        if enforce_lookback and not self._in_lookback(published_dt):
             return None
         if min_published_utc and published_dt:
             pdt = published_dt
@@ -204,19 +274,39 @@ class PremiumCrawler:
     async def _fetch_nyt_topstories(self, min_published_utc: datetime.datetime | None = None) -> list[dict]:
         nyt_api_key = os.getenv("NYT_API_KEY", "").strip()
         if not nyt_api_key:
+            self.db.record_news_ingest_attempt(
+                "NYT-TopStories",
+                status="skipped",
+                error="missing_nyt_api_key",
+            )
+            return []
+        if requests is None:
+            self.db.record_news_ingest_attempt(
+                "NYT-TopStories",
+                status="skipped",
+                error="missing_requests",
+            )
             return []
 
         articles: list[dict] = []
         fetched_at = datetime.datetime.now(datetime.timezone.utc)
         for sec_eng, sec_kor in self.nyt_sections.items():
             url = f"https://api.nytimes.com/svc/topstories/v2/{sec_eng}.json?api-key={nyt_api_key}"
+            source_name = f"NYT-Top-{sec_eng}"
             try:
                 response = await asyncio.to_thread(requests.get, url, timeout=self.request_timeout)
                 if response.status_code != 200:
+                    self.db.record_news_ingest_attempt(
+                        source_name,
+                        status="error",
+                        error=f"http_{response.status_code}",
+                        attempted_at=fetched_at.isoformat(),
+                    )
                     await asyncio.sleep(self.nyt_rate_limit_sec)
                     continue
                 payload = response.json()
                 rows = payload.get("results", [])[: self.max_per_source]
+                added = 0
                 for row in rows:
                     item = self._normalize_article(
                         source="NYT",
@@ -233,13 +323,35 @@ class PremiumCrawler:
                         },
                         fetched_at_utc=fetched_at,
                         min_published_utc=min_published_utc,
+                        enforce_lookback=True,
                     )
                     if item:
                         articles.append(item)
+                        added += 1
+                self.db.record_news_ingest_attempt(
+                    source_name,
+                    status="success" if added > 0 else "no_data",
+                    item_count=added,
+                    cursor={"section": sec_eng},
+                    success_at=fetched_at.isoformat() if added > 0 else None,
+                    attempted_at=fetched_at.isoformat(),
+                )
             except Exception:
-                pass
+                self.db.record_news_ingest_attempt(
+                    source_name,
+                    status="error",
+                    error="exception",
+                    attempted_at=fetched_at.isoformat(),
+                )
             # NYT free tier rate limit 보호
             await asyncio.sleep(self.nyt_rate_limit_sec)
+        self.db.record_news_ingest_attempt(
+            "NYT-TopStories",
+            status="success" if articles else "no_data",
+            item_count=len(articles),
+            success_at=fetched_at.isoformat() if articles else None,
+            attempted_at=fetched_at.isoformat(),
+        )
         return articles
 
     async def _fetch_nyt_articlesearch(
@@ -249,6 +361,18 @@ class PremiumCrawler:
     ) -> list[dict]:
         nyt_api_key = os.getenv("NYT_API_KEY", "").strip()
         if not nyt_api_key:
+            self.db.record_news_ingest_attempt(
+                "NYT-ArticleSearch",
+                status="skipped",
+                error="missing_nyt_api_key",
+            )
+            return []
+        if requests is None:
+            self.db.record_news_ingest_attempt(
+                "NYT-ArticleSearch",
+                status="skipped",
+                error="missing_requests",
+            )
             return []
 
         start_date = window_start_utc.strftime("%Y%m%d")
@@ -256,6 +380,7 @@ class PremiumCrawler:
         pages = max(1, min(3, (self.max_per_source + 9) // 10))
         fetched_at = datetime.datetime.now(datetime.timezone.utc)
         all_articles: list[dict] = []
+        had_error = False
 
         for page in range(pages):
             url = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
@@ -274,6 +399,7 @@ class PremiumCrawler:
                     timeout=self.request_timeout,
                 )
                 if response.status_code != 200:
+                    had_error = True
                     await asyncio.sleep(self.nyt_rate_limit_sec)
                     continue
                 docs = ((response.json() or {}).get("response") or {}).get("docs", [])
@@ -302,17 +428,36 @@ class PremiumCrawler:
                         },
                         fetched_at_utc=fetched_at,
                         min_published_utc=window_start_utc,
+                        enforce_lookback=True,
                     )
                     if item:
                         all_articles.append(item)
             except Exception:
-                pass
+                had_error = True
             await asyncio.sleep(self.nyt_rate_limit_sec)
+        self.db.record_news_ingest_attempt(
+            "NYT-ArticleSearch",
+            status="success" if all_articles else ("error" if had_error else "no_data"),
+            item_count=len(all_articles),
+            cursor={
+                "window_start": window_start_utc.isoformat(),
+                "window_end": window_end_utc.isoformat(),
+                "pages": pages,
+            },
+            success_at=fetched_at.isoformat() if all_articles else None,
+            attempted_at=fetched_at.isoformat(),
+            error="partial_failure" if had_error and all_articles else ("all_pages_failed" if had_error else ""),
+        )
         return all_articles
 
     async def _fetch_rss_articles(self, min_published_utc: datetime.datetime | None = None) -> list[dict]:
         if feedparser is None:
             print("[news] feedparser 미설치로 RSS 소스는 건너뜁니다.")
+            self.db.record_news_ingest_attempt(
+                "RSS",
+                status="skipped",
+                error="missing_feedparser",
+            )
             return []
         rss_sources = [
             ("Reuters-Business", "rss", "Business", "https://feeds.reuters.com/reuters/businessNews"),
@@ -332,6 +477,7 @@ class PremiumCrawler:
             try:
                 feed = await asyncio.to_thread(_run)
                 entries = list(getattr(feed, "entries", []))[: self.max_per_source]
+                bozo_error = getattr(feed, "bozo_exception", None)
                 for e in entries:
                     published = (
                         e.get("published")
@@ -353,10 +499,25 @@ class PremiumCrawler:
                         },
                         fetched_at_utc=fetched_at,
                         min_published_utc=min_published_utc,
+                        enforce_lookback=True,
                     )
                     if item:
                         out.append(item)
+                self.db.record_news_ingest_attempt(
+                    source_name,
+                    status="success" if out else ("error" if bozo_error else "no_data"),
+                    item_count=len(out),
+                    success_at=fetched_at.isoformat() if out else None,
+                    attempted_at=fetched_at.isoformat(),
+                    error=str(bozo_error)[:500] if bozo_error else "",
+                )
             except Exception:
+                self.db.record_news_ingest_attempt(
+                    source_name,
+                    status="error",
+                    error="exception",
+                    attempted_at=fetched_at.isoformat(),
+                )
                 return []
             return out
 
@@ -365,22 +526,37 @@ class PremiumCrawler:
         merged = []
         for rows in all_rows:
             merged.extend(rows)
+        self.db.record_news_ingest_attempt(
+            "RSS",
+            status="success" if merged else "no_data",
+            item_count=len(merged),
+            success_at=datetime.datetime.now(datetime.timezone.utc).isoformat() if merged else None,
+        )
         return merged
 
     def _dedup_articles(self, rows: list[dict]) -> list[dict]:
         uniq: dict[str, dict] = {}
         for r in rows:
+            if not isinstance(r, dict):
+                continue
             k = r.get("article_key", "")
             if not k:
                 continue
-            if k not in uniq:
+            old = uniq.get(k)
+            if old is None or self._article_rank(r) > self._article_rank(old):
                 uniq[k] = r
+
+        secondary: dict[str, dict] = {}
+        for r in uniq.values():
+            content_hash = str(r.get("content_hash", "")).strip()
+            if not content_hash:
+                secondary[self._hash(str(r))] = r
                 continue
-            # 최신 published_at 우선
-            old = uniq[k]
-            if str(r.get("published_at", "")) > str(old.get("published_at", "")):
-                uniq[k] = r
-        return list(uniq.values())
+            sec_key = f"{r.get('date', '')}|{content_hash}"
+            old = secondary.get(sec_key)
+            if old is None or self._article_rank(r) > self._article_rank(old):
+                secondary[sec_key] = r
+        return list(secondary.values())
 
     def _tokenize(self, text: str) -> list[str]:
         tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-]{2,}|[가-힣]{2,}", text.lower())
@@ -401,20 +577,25 @@ class PremiumCrawler:
 
     def _cluster_events(self, articles: list[dict]) -> tuple[list[dict], list[dict]]:
         # 최신 기사 우선
-        rows = sorted(articles, key=lambda x: str(x.get("published_at", "")), reverse=True)
+        rows = sorted(
+            [a for a in articles if isinstance(a, dict)],
+            key=lambda x: str(x.get("published_at", "")),
+            reverse=True,
+        )
         clusters: list[dict] = []
 
         for a in rows:
             title = a.get("title", "")
             summary = a.get("summary", "")
             date = a.get("date", "")
+            published_at = self._parse_iso_utc(str(a.get("published_at", "") or ""))
             kws = set(self._tokenize(f"{title} {summary}")[:20])
             source = a.get("source", "")
 
             best_idx = -1
             best_score = 0.0
             for idx, c in enumerate(clusters):
-                if c["date"] != date:
+                if not self._published_within_cluster_window(published_at, c.get("latest_published_at")):
                     continue
                 inter = len(kws & c["keywords"])
                 union = len(kws | c["keywords"]) or 1
@@ -430,6 +611,12 @@ class PremiumCrawler:
                 c["keywords"].update(kws)
                 c["sources"].add(source)
                 c["title_counter"][title] += 1
+                if published_at and (
+                    c.get("latest_published_at") is None
+                    or published_at > c.get("latest_published_at")
+                ):
+                    c["latest_published_at"] = published_at
+                    c["date"] = published_at.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d")
             else:
                 clusters.append(
                     {
@@ -438,6 +625,7 @@ class PremiumCrawler:
                         "keywords": set(kws),
                         "sources": {source},
                         "title_counter": Counter([title]),
+                        "latest_published_at": published_at,
                     }
                 )
 
@@ -475,6 +663,7 @@ class PremiumCrawler:
                 }
             )
 
+        events = self._align_with_existing_event_keys(events)
         events = sorted(
             events,
             key=lambda x: (x.get("date", ""), float(x.get("confidence", 0.0)), int(x.get("article_count", 0))),
@@ -543,23 +732,41 @@ class PremiumCrawler:
         self.db.save_news_articles_bulk(filtered_articles)
 
         run_finished_utc = datetime.datetime.now(datetime.timezone.utc)
-        self.db.save_news_ingest_checkpoint(
+        pipeline_cursor = {
+            "mode": mode,
+            "window_start": window_start_utc.isoformat(),
+            "window_end": window_end_utc.isoformat(),
+            "saved_articles": len(filtered_articles),
+            "merged_articles": len(merged),
+            "clustered_events": len(events),
+        }
+        self.db.record_news_ingest_attempt(
             "news_pipeline",
-            run_finished_utc.isoformat(),
-            {
-                "mode": mode,
-                "window_start": window_start_utc.isoformat(),
-                "window_end": window_end_utc.isoformat(),
-                "saved_articles": len(filtered_articles),
-            },
+            status="success" if filtered_articles else "no_data",
+            item_count=len(filtered_articles),
+            cursor=pipeline_cursor,
+            success_at=run_finished_utc.isoformat() if filtered_articles else None,
+            attempted_at=run_finished_utc.isoformat(),
+            error="no_articles_saved" if not filtered_articles else "",
         )
+        if filtered_articles:
+            self.db.save_news_ingest_checkpoint(
+                "news_pipeline",
+                run_finished_utc.isoformat(),
+                pipeline_cursor,
+            )
 
         today_str = datetime.datetime.now().strftime("%Y%m%d")
-        txt_path = os.path.join(self.news_archive_dir, f"premium_news_{today_str}.txt")
-        json_path = os.path.join(self.news_archive_dir, f"premium_news_{today_str}.json")
+        run_stamp = run_finished_utc.strftime("%H%M%S")
+        txt_path = os.path.join(self.news_archive_dir, f"premium_news_{today_str}_{run_stamp}_{mode}.txt")
+        json_path = os.path.join(self.news_archive_dir, f"premium_news_{today_str}_{run_stamp}_{mode}.json")
+        latest_txt_path = os.path.join(self.news_archive_dir, f"premium_news_{today_str}.txt")
+        latest_json_path = os.path.join(self.news_archive_dir, f"premium_news_{today_str}.json")
 
         text_brief = self._render_text_brief(events, filtered_articles)
         with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(text_brief)
+        with open(latest_txt_path, "w", encoding="utf-8") as f:
             f.write(text_brief)
 
         payload = {
@@ -580,10 +787,14 @@ class PremiumCrawler:
         }
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+        with open(latest_json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
         ended = datetime.datetime.now()
         print(f"[{ended}] 뉴스 저장 완료: {txt_path}")
         print(f"[{ended}] 구조화 JSON 저장 완료: {json_path}")
+        if not filtered_articles:
+            print(f"[{ended}] 경고: 이번 실행은 저장된 기사가 없어 pipeline checkpoint는 전진하지 않았습니다.")
         return text_brief
 
     async def execute_daily_scrape(self):

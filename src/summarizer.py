@@ -10,33 +10,47 @@ class RAGSummarizer:
         self.llm = LLMClientManager()
 
     async def summarize_daily(self, target_date: str | None = None):
-        """특정 날짜(기본값: 오늘)의 토론 원본을 모두 모아 일간 요약본 생성"""
+        """특정 날짜(기본값: 오늘)의 시장 이벤트 + 토론 결론을 합쳐 일간 요약본 생성"""
         if target_date is None:
             target_date = datetime.now().strftime('%Y-%m-%d')
-            
-        self.db.cursor.execute("SELECT topic, consensus_status, investment_json FROM debates WHERE date = ?", (target_date,))
-        rows = self.db.cursor.fetchall()
-        
-        if not rows:
-            print(f"[{target_date}] 요약할 일간 토론 기록이 없습니다.")
+
+        rows = self.db.list_debates_by_date(target_date)
+        news_rows = [e for e in self.db.list_news_events_since(target_date, limit=40) if e.get("date") == target_date]
+
+        if not rows and not news_rows:
+            print(f"[{target_date}] 요약할 일간 이벤트/토론 기록이 없습니다.")
             return
 
         combined_logs = ""
+        if news_rows:
+            combined_logs += "[오늘의 핵심 뉴스 이벤트]\n"
+            for i, event in enumerate(news_rows[:12], 1):
+                combined_logs += (
+                    f"=== 뉴스 이벤트 {i} ===\n"
+                    f"제목: {event.get('title', '')}\n"
+                    f"요약: {event.get('summary', '')}\n"
+                    f"신뢰도: conf={event.get('confidence', 0)}, "
+                    f"sources={event.get('source_count', 0)}, articles={event.get('article_count', 0)}\n\n"
+                )
+
         for i, row in enumerate(rows):
             topic, status, inv_json = row
-            # JSON 텍스트 그대로 넣거나, 핵심만 분리해서 전달
             combined_logs += f"=== 토론 {i+1} (주제: {topic} / 상황: {status}) ===\n[판결내용]: {inv_json}\n\n"
 
         sys_prompt = (
-            "너는 주식 토론 회의록 정리의 달인(수석 투자 전략가)이야. 사용자가 건네주는 '오늘 진행된 AI 토론 결론들(주제와 판결문)'을 읽고,\n"
-            "이 대화들에 어떤 핵심 쟁점과 트렌드가 관통하고 있는지, 그리고 내일 시장을 대비한 거시적인 결론을 5문장 이내로 전문적으로 압축해줘.\n"
-            "추가로, 마지막 줄에는 대화의 핵심 키워드를 해시태그 형식으로 5개만 뽑아서 기재해줘 (예: #엔비디아 #VIX급등 #안전자산)."
+            "너는 주식 토론 회의록 정리의 달인(수석 투자 전략가)이야. 사용자가 건네주는 '오늘의 뉴스 이벤트'와 "
+            "'오늘 진행된 AI 토론 결론들'을 함께 읽고,\n"
+            "1) 시장을 움직인 핵심 이벤트,\n"
+            "2) 토론이 도달한 주요 판단,\n"
+            "3) 내일 점검할 리스크/확인 포인트\n"
+            "를 7문장 이내로 전문적으로 압축해줘.\n"
+            "마지막 줄에는 핵심 키워드를 해시태그 5개로 적어줘."
         )
 
         user_prompt = f"[오늘의 토론 내역]\n{combined_logs}"
 
         print(f"[{target_date}] 일간 요약을 gpt-oss-20b 로컬 모델에 요청합니다...")
-        summary = await self.llm.get_local_response(sys_prompt, user_prompt)
+        summary = await self.llm.get_local_response(sys_prompt, user_prompt, profile="summary")
         
         # 키워드 대충 추출 (해시태그 기반)
         keywords = ", ".join([word for word in summary.split() if word.startswith('#')])
@@ -48,13 +62,8 @@ class RAGSummarizer:
         """최근 7일간의 '일간 요약본'을 모아 주간 요약본 생성"""
         today = datetime.now()
         week_ago = today - timedelta(days=7)
-        
-        # 최근 7일간의 일간 요약 조회 (간단한 문자열 비교)
-        self.db.cursor.execute(
-            "SELECT target_date, summary_text FROM summaries WHERE summary_type = 'daily' AND target_date >= ?", 
-            (week_ago.strftime('%Y-%m-%d'),)
-        )
-        rows = self.db.cursor.fetchall()
+
+        rows = self.db.list_summaries_by_type_since('daily', week_ago.strftime('%Y-%m-%d'))
         
         if not rows:
             print("요약할 주간 데이터(일간 요약본)가 부족합니다.")
@@ -71,7 +80,7 @@ class RAGSummarizer:
         user_prompt = f"[일간 요약 모음]\n{week_logs}"
         
         print(f"[{target_range}] 주간 요약 중...")
-        summary = await self.llm.get_local_response(sys_prompt, user_prompt)
+        summary = await self.llm.get_local_response(sys_prompt, user_prompt, profile="summary")
         
         self.db.save_summary('weekly', target_range, summary, "주간전망, 트렌드")
         print(f"✅ [{target_range}] 주간 요약 완료 및 DB 저장됨.")
@@ -80,12 +89,8 @@ class RAGSummarizer:
         """최근 30일간의 '일간/주간 요약본'을 모아 월간 요약본 생성"""
         today = datetime.now()
         month_ago = today - timedelta(days=30)
-        
-        self.db.cursor.execute(
-            "SELECT target_date, summary_text FROM summaries WHERE summary_type = 'weekly' AND target_date >= ?", 
-            (month_ago.strftime('%Y-%m-%d'),)
-        )
-        rows = self.db.cursor.fetchall()
+
+        rows = self.db.list_summaries_by_type_since('weekly', month_ago.strftime('%Y-%m-%d'))
         
         if not rows:
             print("요약할 월간 데이터(주간 요약본)가 부족합니다.")
@@ -102,7 +107,7 @@ class RAGSummarizer:
         user_prompt = f"[주간 요약 모음]\n{month_logs}"
         
         print(f"[{target_range}] 월간 요약 중...")
-        summary = await self.llm.get_local_response(sys_prompt, user_prompt)
+        summary = await self.llm.get_local_response(sys_prompt, user_prompt, profile="summary")
         
         self.db.save_summary('monthly', target_range, summary, "월간전망, 거시경제, 거시트렌드")
         print(f"✅ [{target_range}] 월간 요약 완료 및 DB 저장됨.")

@@ -9,6 +9,7 @@ from json_utils import (
     validate_final_verdict_payload,
     validate_unanimity_payload,
 )
+from news_context_pack import NewsContextPackService
 from ontology import OntologyStore, HybridResearchPlanner, EvidenceRelationMiner
 
 async def send_chunked(ctx, text: str):
@@ -30,6 +31,7 @@ class DebateController:
         self.db = db_manager.DBManager()
         self.data_pipeline = MasterDataPipeline(self.llm)
         self.rag_agent = RAGAgent(self.llm)
+        self.news_context = NewsContextPackService(self.db)
         self.ontology = OntologyStore()
         self.planner = HybridResearchPlanner(self.ontology)
         self.relation_miner = EvidenceRelationMiner(self.ontology)
@@ -49,7 +51,6 @@ class DebateController:
     async def run_full_debate(self, ctx, user_query: str, portfolio_context: str = ""):
         """메인 봇에서 호출되는 2~3라운드 토론 전체 로직"""
         import os
-        import glob
         import json
         
         await ctx.send(f"🔍 `{user_query}` 주제 분석 및 방향성 설정 중...")
@@ -61,7 +62,7 @@ class DebateController:
         # 로컬 모델 가용성 사전 점검 (장애 시 강등 모드)
         local_available = True
         try:
-            await self.llm.get_local_response("JSON 출력기", "{\"ping\":\"ok\"}")
+            await self.llm.get_local_response("JSON 출력기", "{\"ping\":\"ok\"}", profile="json")
         except Exception as e:
             local_available = False
             await ctx.send(f"⚠️ **[강등 모드]** 로컬 모델 연결 실패로 일부 기능이 제한됩니다: {e}")
@@ -100,7 +101,7 @@ class DebateController:
         
         if local_available:
             try:
-                class_json_str = await self.llm.get_local_response(classify_prompt, user_query)
+                class_json_str = await self.llm.get_local_response(classify_prompt, user_query, profile="json")
                 is_recent_issue = True
                 parsed = parse_json_object(class_json_str) or {}
                 is_recent_issue = bool(parsed.get("is_recent_issue", True))
@@ -109,57 +110,6 @@ class DebateController:
         else:
             is_recent_issue = True
             
-        if is_recent_issue:
-            await ctx.send("📰 **[최신 이슈 기반 토론]** 판정. 로컬 판사가 최근 수일 간의 뉴욕타임스 기사를 정독하고 관련된 지식만 추출합니다...")
-            news_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "news_archive")
-            files = glob.glob(os.path.join(news_dir, "premium_news_*.txt"))
-            if files:
-                files.sort(reverse=True)  # 가장 최근 파일 선택
-                recent_news_texts = []
-                # 최근 5일치 뉴스를 취합 (토큰 폭발을 고려해 방대한 양)
-                for f_path in files[:5]:
-                    try:
-                        with open(f_path, 'r', encoding='utf-8') as f:
-                            recent_news_texts.append(f.read())
-                    except Exception:
-                        pass
-                        
-                combined_news = "\n".join(recent_news_texts)
-                
-                # 로컬 모델(gpt-oss-20b)에게 필요한 뉴스만 선별/요약 부탁
-                filter_prompt = (
-                    f"너는 최고 수준의 금융/IT 정보 분석가야. 아래에는 최근 수일 간의 방대한 '뉴욕타임스 글로벌 프리미엄 뉴스 요약본' 텍스트 뭉치가 있어.\n"
-                    f"사용자의 토론 주제는 ['{user_query}'] 야.\n"
-                    f"만약 주제가 매우 구체적이라면 그와 직접적으로 연관된 기사들만 골라서 깊이 있게 요약해주고, "
-                    f"주제가 '투자할 만한 곳', '최근 유망한 이슈' 등 광범위하다면, 제공된 텍스트 전체에서 가장 중요한 호재/악재를 추출해줘.\n"
-                    f"각각의 뉴스 항목에 대해 핵심 내용과 구체적인 컨텍스트를 3~4문장 분량으로 상세하게 풀어서 설명해.\n"
-                    f"[최종 규칙: 엄격한 팩트 준수]: 절대로 네가 사전 학습한 과거의 주가, 재무제표(PER, ROE 등), 배당률, 수치 등 근거 없는 환각(Hallucination) 데이터를 섞어 넣지 마라. 오직 주어진 텍스트 파일(뉴스본)에 있는 숫자만 활용하고 없으면 적지 마라."
-                )
-                if local_available:
-                    try:
-                        # 로컬 모델 글자수 한계 방지를 위해 최대 5만자까지만 앞부분에서 잘라 넘김
-                        filtered_news = await self.llm.get_local_response(filter_prompt, combined_news[:50000])
-                        history += f"**[최근 글로벌 프리미엄 주요 뉴스 중 주제 관련 핵심 필터링 요약]**\n{filtered_news}\n\n"
-                        await ctx.send("✅ 방대한 뉴스 DB에서 이번 토론 주제에 꼭 필요한 '핵심 지식'만 깔끔하게 정제 완료했습니다!")
-                    except Exception as e:
-                        await ctx.send(f"⚠️ 지능형 뉴스 필터링 오류: {e} (최신 1일치 원문으로 대체합니다.)")
-                        if recent_news_texts:
-                            news_excerpt = recent_news_texts[0]
-                            news_excerpt_str = news_excerpt if isinstance(news_excerpt, str) else str(news_excerpt)
-                            history += f"**[오늘의 글로벌 뉴스 (보조 데이터)]**\n{news_excerpt_str[:3000]}\n\n"
-                        else:
-                            history += "**[오늘의 글로벌 뉴스 (보조 데이터)]**\n(수집된 글로벌 뉴스 원문 텍스트가 없습니다.)\n\n"
-                else:
-                    if recent_news_texts:
-                        news_excerpt = recent_news_texts[0]
-                        news_excerpt_str = news_excerpt if isinstance(news_excerpt, str) else str(news_excerpt)
-                        history += f"**[오늘의 글로벌 뉴스 (보조 데이터)]**\n{news_excerpt_str[:3000]}\n\n"
-                    await ctx.send("ℹ️ 로컬 모델 비활성 상태라 뉴스 정제 요약은 건너뛰고 원문 일부를 사용합니다.")
-            else:
-                await ctx.send("⚠️ 수집된 프리미엄 뉴스 백업 파일이 없습니다.")
-        else:
-            await ctx.send("💡 **[일반 투자 철학/원론적 토론 모드]** (최신 뉴스보다 보편적인 투자 논리에 집중합니다.)")
-
         # 온톨로지 기반 사전 플래닝 (온톨로지 -> RAG -> 웹검색 동선)
         ontology_plan = self.planner.build_plan(user_query)
         history += (
@@ -169,9 +119,37 @@ class DebateController:
         linked_preview = ", ".join(
             [e.get("ticker") or e.get("name") or "" for e in ontology_plan.get("linked_entities", [])[:4]]
         )
-        await ctx.send(
-            f"🧭 **[리서치 플랜]** mode={ontology_plan.get('mode')} | coverage={ontology_plan.get('coverage')} | linked={linked_preview or '없음'}"
+        hidden_preview = ", ".join(
+            [c.get("ticker") or c.get("name") or "" for c in ontology_plan.get("hidden_candidates", [])[:3]]
         )
+        await ctx.send(
+            f"🧭 **[리서치 플랜]** mode={ontology_plan.get('mode')} | coverage={ontology_plan.get('coverage')} | "
+            f"linked={linked_preview or '없음'} | hidden={hidden_preview or '없음'}"
+        )
+
+        if is_recent_issue:
+            await ctx.send("📰 **[최신 이슈 기반 토론]** 판정. 독립 뉴스 Context Pack을 생성합니다...")
+            context_pack = self.news_context.build_for_query(
+                query=user_query,
+                tickers=ontology_plan.get("tickers", []) if isinstance(ontology_plan, dict) else [],
+                extra_terms=ontology_plan.get("rag_keywords", []) if isinstance(ontology_plan, dict) else [],
+                event_limit=8,
+                evidence_limit=5,
+                lookback_hours=168,
+            )
+            context_brief = self.news_context.render_for_model(context_pack)
+            quality = context_pack.get("quality", {}) if isinstance(context_pack, dict) else {}
+            if context_brief:
+                history += f"**[독립 뉴스 Context Pack]**\n{context_brief}\n\n"
+                await ctx.send(
+                    f"✅ 뉴스팩 생성 완료: state={quality.get('state')} score={quality.get('score')} | "
+                    f"이벤트 {quality.get('event_count', 0)}건, 웹검증 {quality.get('research_count', 0)}건 | "
+                    f"web_required={quality.get('web_required', False)}"
+                )
+            else:
+                await ctx.send("⚠️ 뉴스팩이 비어 있어 웹검증 기반 팩트시트 비중을 높입니다.")
+        else:
+            await ctx.send("💡 **[일반 투자 철학/원론적 토론 모드]** (최신 뉴스보다 보편적인 투자 논리에 집중합니다.)")
         
         roles = {
             "gpt-5.2-2025-12-11": "찬성 또는 공격적 성장 모델 지지",
@@ -201,7 +179,7 @@ class DebateController:
             query_upper_tokens = set(re.findall(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3})?\b", user_query.upper()))
 
             if local_available:
-                extract_json_str = await self.llm.get_local_response(extract_prompt, user_query)
+                extract_json_str = await self.llm.get_local_response(extract_prompt, user_query, profile="json")
                 extract_data = parse_json_object(extract_json_str) or {}
                 tickers = extract_data.get("tickers", []) if extract_data else []
                 searches = extract_data.get("searches", []) if extract_data else []
@@ -222,10 +200,15 @@ class DebateController:
                 for e in (ontology_plan.get("linked_entities", []) if isinstance(ontology_plan, dict) else [])
                 if isinstance(e, dict)
             }
+            hidden_tickers = {
+                str(e.get("ticker", "")).strip().upper()
+                for e in (ontology_plan.get("hidden_candidates", []) if isinstance(ontology_plan, dict) else [])
+                if isinstance(e, dict)
+            }
             filtered_tickers = []
             for t in merged_tickers:
                 tu = t.upper()
-                if tu in query_upper_tokens or tu in linked_tickers:
+                if tu in query_upper_tokens or tu in linked_tickers or tu in hidden_tickers:
                     filtered_tickers.append(t)
             tickers = filtered_tickers[:2]
 
@@ -286,13 +269,14 @@ class DebateController:
                 "생산 공정", "분석 및 타겟", "사고과정", "지시사항 점검", "최종 다듬기",
                 "사고과정 제거", "완료.", "시작]", "종료]", "초안 작성", "핵심 논리 전개",
             )
-            keep_tag_prefixes = ("[SEARCH:", "[최종 선택:", "[근거ID:", "[ACK", "[조준:")
             out_lines = []
             for line in cleaned.splitlines():
                 s = line.strip()
                 if not s:
                     continue
-                if any(s.startswith(prefix) for prefix in keep_tag_prefixes):
+                if re.match(r"^\[\s*ACK(?:[^\]]*)\]$", s, flags=re.IGNORECASE) or re.match(
+                    r"^\[\s*(SEARCH|최종\s*선택|근거ID|조준)\s*[:：]", s, flags=re.IGNORECASE
+                ):
                     out_lines.append(line)
                     continue
                 if s.startswith("[") and s.endswith("]"):
@@ -302,24 +286,46 @@ class DebateController:
                 out_lines.append(line)
             return "\n".join(out_lines).strip()
 
+        def _is_model_failure_text(text: str) -> bool:
+            lowered = str(text or "").strip().lower()
+            if not lowered:
+                return True
+            return (
+                lowered.startswith("error from ")
+                or lowered.startswith("local model error")
+                or lowered.startswith("오류:")
+                or "circuitopen" in lowered
+            )
+
         def _extract_search_queries(text: str) -> list[str]:
-            queries = re.findall(r"\[SEARCH:\s*(.+?)\]", text or "", flags=re.IGNORECASE | re.DOTALL)
+            queries = re.findall(r"\[\s*SEARCH\s*:\s*(.+?)\]", text or "", flags=re.IGNORECASE | re.DOTALL)
             out = []
             seen = set()
-            banned_fragments = (
+            banned_exact = {
                 "검색할 구체적인 키워드",
                 "반대 관점 키워드",
-                "키워드",
+                "keyword",
+                "keywords",
+                "search query",
+                "query",
                 "...",
-            )
+            }
             for q in queries:
-                qs = re.sub(r"\s+", " ", q.strip())
+                qs = re.sub(r"\s+", " ", q.strip()).strip("`'\" ")
+                ql = qs.lower()
                 # 모델이 프롬프트 문구를 그대로 복붙하는 경우 차단
-                if not qs or any(b in qs for b in banned_fragments):
+                if not qs:
+                    continue
+                if ql in banned_exact:
+                    continue
+                if "검색할 구체적인 키워드" in ql or "반대 관점 키워드" in ql:
+                    continue
+                # 단독 플레이스홀더류 차단 (예: "키워드", "키워드 예시")
+                if re.fullmatch(r"(키워드|키워드\s*예시|search\s*keyword[s]?)", ql):
                     continue
                 if len(qs) < 6:
                     continue
-                qn = qs.lower()
+                qn = ql
                 if qs and qn not in seen:
                     out.append(qs)
                     seen.add(qn)
@@ -413,10 +419,12 @@ class DebateController:
                     # 내부 사고(<thought>)는 디스코드 UI에만 송출하고 공통 히스토리에서는 제거
                     clean_rep = re.sub(r'<thought>.*?</thought>', '', str(rep_text), flags=re.DOTALL).strip()
                     clean_rep = _sanitize_model_output(clean_rep)
+                    if _is_model_failure_text(clean_rep):
+                        clean_rep = f"[시스템] {model_n} 응답 실패 또는 가용성 저하"
                     dyn_hist += f"[{model_n} {turn_idx}R 최초 발언]:\n{clean_rep}\n\n"
                     display_text = clean_rep if clean_rep else str(rep_text)
                     await send_chunked(ctx, f"🗣️ **[{model_n} 블라인드 발언]**\n{display_text}")
-                    if _has_ack(str(rep_text)):
+                    if not _is_model_failure_text(clean_rep) and _has_ack(str(rep_text)):
                         loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), model_n]
 
                 return dyn_hist, 0, loop_meta
@@ -540,11 +548,13 @@ class DebateController:
 
                     clean_defense = re.sub(r'<thought>.*?</thought>', '', str(defense_rep), flags=re.DOTALL).strip()
                     clean_defense = _sanitize_model_output(clean_defense)
+                    if _is_model_failure_text(clean_defense):
+                        clean_defense = f"[시스템] {target_model} 즉각 방어 실패 또는 가용성 저하"
                     hist += f"[{target_model} {turn_idx}R 즉각 방어({attacker_model} 조준)]:\n{clean_defense}\n\n"
                     display_defense = clean_defense if clean_defense else str(defense_rep)
                     await send_chunked(ctx, f"🛡️ **[{target_model} 즉각 방어]**\n{display_defense}")
 
-                    if _has_ack(str(defense_rep)):
+                    if not _is_model_failure_text(clean_defense) and _has_ack(str(defense_rep)):
                         loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), target_model]
 
                     hist, defense_research = await handle_research_request(target_model, clean_defense, hist)
@@ -560,10 +570,12 @@ class DebateController:
                 
                 clean_gpt = re.sub(r'<thought>.*?</thought>', '', str(gpt_rep), flags=re.DOTALL).strip()
                 clean_gpt = _sanitize_model_output(clean_gpt)
+                if _is_model_failure_text(clean_gpt):
+                    clean_gpt = f"[시스템] {gpt_name} 응답 실패 또는 가용성 저하"
                 dyn_hist += f"[{gpt_name} {turn_idx}R 주장]:\n{clean_gpt}\n\n"
                 display_gpt = clean_gpt if clean_gpt else str(gpt_rep)
                 await send_chunked(ctx, f"🗣️ **[{gpt_name}]**\n{display_gpt}")
-                if _has_ack(str(gpt_rep)):
+                if not _is_model_failure_text(clean_gpt) and _has_ack(str(gpt_rep)):
                     loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), gpt_name]
                 dyn_hist, gpt_research = await handle_research_request(gpt_name, clean_gpt, dyn_hist)
                 defended_targets: set[str] = set()
@@ -579,10 +591,12 @@ class DebateController:
                 
                 clean_claude = re.sub(r'<thought>.*?</thought>', '', str(claude_rep), flags=re.DOTALL).strip()
                 clean_claude = _sanitize_model_output(clean_claude)
+                if _is_model_failure_text(clean_claude):
+                    clean_claude = f"[시스템] {claude_name} 응답 실패 또는 가용성 저하"
                 dyn_hist += f"[{claude_name} {turn_idx}R 반박]:\n{clean_claude}\n\n"
                 display_claude = clean_claude if clean_claude else str(claude_rep)
                 await send_chunked(ctx, f"🗣️ **[{claude_name}]**\n{display_claude}")
-                if _has_ack(str(claude_rep)):
+                if not _is_model_failure_text(clean_claude) and _has_ack(str(claude_rep)):
                     loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), claude_name]
                 dyn_hist, claude_research = await handle_research_request(claude_name, clean_claude, dyn_hist)
                 dyn_hist, claude_def_research = await maybe_instant_defense(claude_name, clean_claude, dyn_hist, defended_targets)
@@ -597,10 +611,12 @@ class DebateController:
                 
                 clean_gemini = re.sub(r'<thought>.*?</thought>', '', str(gemini_rep), flags=re.DOTALL).strip()
                 clean_gemini = _sanitize_model_output(clean_gemini)
+                if _is_model_failure_text(clean_gemini):
+                    clean_gemini = f"[시스템] {gemini_name} 응답 실패 또는 가용성 저하"
                 dyn_hist += f"[{gemini_name} {turn_idx}R 타격]:\n{clean_gemini}\n\n"
                 display_gemini = clean_gemini if clean_gemini else str(gemini_rep)
                 await send_chunked(ctx, f"🗣️ **[{gemini_name}]**\n{display_gemini}")
-                if _has_ack(str(gemini_rep)):
+                if not _is_model_failure_text(clean_gemini) and _has_ack(str(gemini_rep)):
                     loop_meta["ack_models"] = [*loop_meta.get("ack_models", []), gemini_name]
                 dyn_hist, gemini_research = await handle_research_request(gemini_name, clean_gemini, dyn_hist)
                 dyn_hist, gemini_def_research = await maybe_instant_defense(gemini_name, clean_gemini, dyn_hist, defended_targets)
@@ -691,6 +707,8 @@ class DebateController:
                 repaired_text = await _repair_evidence_tag(model_n, str(rep_text))
                 clean_rep = re.sub(r'<thought>.*?</thought>', '', str(repaired_text), flags=re.DOTALL).strip()
                 clean_rep = _sanitize_model_output(clean_rep)
+                if _is_model_failure_text(clean_rep):
+                    clean_rep = f"[시스템] {model_n} 최종 결론 생성 실패"
                 final_hist += f"[{model_n} {turn_idx}R 최종 결론]: {clean_rep}\n\n"
                 display_text = clean_rep if clean_rep else str(rep_text)
                 await send_chunked(ctx, f"🎯 **[{model_n} 최종 결론]**\n{display_text}")
@@ -728,10 +746,19 @@ class DebateController:
                 return ""
 
             latest = matches[-1].group(1).strip()
-            tag_match = re.search(r"\[최종 선택:\s*([^\]]+)\]", latest)
+            tag_match = re.search(r"\[\s*최종\s*선택\s*:\s*([^\]\n]+?)\s*\]", latest, flags=re.IGNORECASE)
             if tag_match:
                 return tag_match.group(1).strip()
-            return latest[:120].strip()
+
+            # 태그가 제거된 경우를 대비해 하단 라인에서 마지막 결론 후보를 추출
+            lines = [ln.strip(" *`") for ln in latest.splitlines() if ln.strip()]
+            for ln in reversed(lines):
+                m = re.search(r"최종\s*선택\s*[:：]\s*([^\]\n]+)", ln, flags=re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
+
+            # 최후 fallback: 너무 짧게 자르면 방향성 키워드가 잘릴 수 있어 넉넉히 사용
+            return latest[:400].strip()
 
         async def check_unanimity(current_history: str) -> dict:
             await ctx.send("⚖️ **[로컬 수석 판사 1차 판정: 만장일치 여부 확인 중...]**")
@@ -769,7 +796,7 @@ class DebateController:
                 "만장일치인 경우: {\"status\": \"만장일치\", \"conclusion\": \"만장일치된 최종 선택의 핵심 요약\"}\n"
                 "의견이 엇갈린 경우: {\"status\": \"불합치\", \"votes\": {\"GPT\": \"A자산 추천 요지\", \"Claude\": \"B자산 추천 요지\", \"Gemini\": \"관망 추천 요지 등\"}}"
             )
-            raw = await self.llm.get_local_response(sys_prompt, current_history)
+            raw = await self.llm.get_local_response(sys_prompt, current_history, profile="judge")
             parsed = parse_json_object(raw) or {}
             if validate_unanimity_payload(parsed):
                 return parsed
@@ -780,7 +807,7 @@ class DebateController:
                 "불합치 => {\"status\":\"불합치\",\"votes\":{\"GPT\":\"...\",\"Claude\":\"...\",\"Gemini\":\"...\"}}\n\n"
                 f"[깨진 출력]\n{raw}"
             )
-            raw_retry = await self.llm.get_local_response("JSON 복구기", retry_prompt)
+            raw_retry = await self.llm.get_local_response("JSON 복구기", retry_prompt, profile="json")
             parsed_retry = parse_json_object(raw_retry) or {}
             if validate_unanimity_payload(parsed_retry):
                 return parsed_retry
@@ -821,7 +848,7 @@ class DebateController:
                 "  \"fatal_flaw\": \"패자(혹은 다수결) 진영이 무시한 치명적 팩트나 억지스러운 맹점(확증 편향) 지적\"\n"
                 "}"
             )
-            raw = await self.llm.get_local_response(sys_prompt, current_history)
+            raw = await self.llm.get_local_response(sys_prompt, current_history, profile="judge")
             parsed = parse_json_object(raw) or {}
             if validate_final_verdict_payload(parsed):
                 return parsed
@@ -831,7 +858,7 @@ class DebateController:
                 "필드: status, majority_choice, logical_winner, fatal_flaw (모두 문자열)\n\n"
                 f"[깨진 출력]\n{raw}"
             )
-            raw_retry = await self.llm.get_local_response("JSON 복구기", retry_prompt)
+            raw_retry = await self.llm.get_local_response("JSON 복구기", retry_prompt, profile="json")
             parsed_retry = parse_json_object(raw_retry) or {}
             if validate_final_verdict_payload(parsed_retry):
                 return parsed_retry

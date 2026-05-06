@@ -24,6 +24,7 @@ ENV/
 chrome_data/
 data/
 news_archive/
+logs/
 data_sources/
 src/data_fetcher/cookies.json
 src/data_fetcher/cookies.local.json

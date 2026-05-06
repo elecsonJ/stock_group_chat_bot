@@ -1,0 +1,86 @@
+{
+  "entities": [
+    {
+      "entity_id": "concept:gold_rush",
+      "canonical_name": "Gold Rush",
+      "entity_type": "macro_event",
+      "aliases": ["gold rush", "광산붐", "광산 붐"]
+    },
+    {
+      "entity_id": "activity:mining",
+      "canonical_name": "Mining Activity",
+      "entity_type": "activity",
+      "aliases": ["mining", "광산 개발", "채굴 활동"]
+    },
+    {
+      "entity_id": "product:durable_workwear",
+      "canonical_name": "Durable Workwear",
+      "entity_type": "product",
+      "aliases": ["durable workwear", "workwear", "작업복", "튼튼한 옷"]
+    },
+    {
+      "entity_id": "company:levi",
+      "canonical_name": "Levi Strauss & Co.",
+      "entity_type": "company",
+      "ticker": "LEVI",
+      "exchange": "NYSE",
+      "sector": "Consumer",
+      "industry": "Apparel",
+      "aliases": ["levi", "levis", "리바이스"]
+    },
+    {
+      "entity_id": "concept:data_center_boom",
+      "canonical_name": "Data Center Boom",
+      "entity_type": "macro_event",
+      "aliases": ["data center boom", "데이터센터 붐", "AI 인프라 붐"]
+    },
+    {
+      "entity_id": "product:power_cooling",
+      "canonical_name": "Power and Cooling Infrastructure",
+      "entity_type": "product",
+      "aliases": ["power and cooling", "전력 냉각 설비", "cooling infrastructure"]
+    },
+    {
+      "entity_id": "company:vertiv",
+      "canonical_name": "Vertiv Holdings Co",
+      "entity_type": "company",
+      "ticker": "VRT",
+      "exchange": "NYSE",
+      "sector": "Industrials",
+      "industry": "Electrical Equipment",
+      "aliases": ["vertiv", "버티브"]
+    }
+  ],
+  "relations": [
+    {
+      "subject_id": "concept:gold_rush",
+      "predicate": "drives_demand_for",
+      "object_id": "activity:mining",
+      "confidence": 0.95
+    },
+    {
+      "subject_id": "activity:mining",
+      "predicate": "requires",
+      "object_id": "product:durable_workwear",
+      "confidence": 0.88
+    },
+    {
+      "subject_id": "company:levi",
+      "predicate": "sells",
+      "object_id": "product:durable_workwear",
+      "confidence": 0.92
+    },
+    {
+      "subject_id": "concept:data_center_boom",
+      "predicate": "drives_demand_for",
+      "object_id": "product:power_cooling",
+      "confidence": 0.93
+    },
+    {
+      "subject_id": "company:vertiv",
+      "predicate": "sells",
+      "object_id": "product:power_cooling",
+      "confidence": 0.9
+    }
+  ]
+}

@@ -3,10 +3,15 @@ import pandas_ta as ta
 import pandas as pd
 import asyncio
 from datetime import datetime, timedelta
+from data_fetcher.dart_official import DARTOfficialFetcher
+from data_fetcher.krx_kind_official import KRXKindOfficialChecker
+from data_fetcher.sec_official import SECOfficialFetcher
 
 class AdvancedDataFetcher:
     def __init__(self):
-        pass
+        self.dart_fetcher = DARTOfficialFetcher()
+        self.krx_kind_checker = KRXKindOfficialChecker()
+        self.sec_fetcher = SECOfficialFetcher()
 
     async def get_comprehensive_stock_data(self, ticker: str) -> str:
         """
@@ -14,6 +19,8 @@ class AdvancedDataFetcher:
         모두 수집하여 하나의 마크다운 텍스트(Fact-Sheet 조각)로 반환합니다.
         비동기로 yfinance I/O가 블로킹되지 않도록 to_thread로 감쌉니다.
         """
+        official_text = await self._get_official_company_text(ticker)
+
         def fetch_sync(t_name):
             try:
                 stock = yf.Ticker(t_name)
@@ -21,6 +28,7 @@ class AdvancedDataFetcher:
                 
                 # 1. 기본 가치평가 및 성장 지표
                 current_price = info.get('currentPrice', info.get('regularMarketPrice', 'N/A'))
+                currency = info.get('currency') or info.get('financialCurrency') or 'N/A'
                 market_cap = info.get('marketCap', 'N/A')
                 trailing_pe = info.get('trailingPE', 'N/A')
                 forward_pe = info.get('forwardPE', 'N/A')
@@ -57,8 +65,10 @@ class AdvancedDataFetcher:
                 
                 # 재무 데이터 텍스트 구축
                 fund_text = (
-                    f"**[종목: {t_name.upper()} | 섹터: {sector} | 산업: {industry}]**\n"
-                    f"- **현재가**: ${current_price} | **시가총액**: {self._format_market_cap(market_cap)}\n"
+                    f"**[비공식 시장/밸류에이션 보조 데이터: {t_name.upper()} | yfinance/Yahoo Finance]**\n"
+                    f"- **신뢰도 주의**: 아래 현재가/밸류에이션/수급 지표는 공식 공시나 브로커 호가가 아니며, 실제 투자 전 별도 확인이 필요합니다.\n"
+                    f"- **섹터/산업**: {sector} / {industry}\n"
+                    f"- **현재가**: {current_price} {currency} | **시가총액**: {self._format_market_cap(market_cap, currency)}\n"
                     f"- **가치평가**: Trailing PER {trailing_pe}배 | Forward PER {forward_pe}배 | PEG {peg_ratio} | PBR {pb_ratio}\n"
                     f"- **수익성/배당**: 순이익률 {profit_margin} | ROE {roe} | 배당수익률 {dividend_yield}\n"
                     f"- **수급/내부자/공매도**: 기관보유율 {inst_own} | 내부자보유율 {insider_own} | 공매도 잔고율 {short_percent} (Short Ratio: {short_ratio})\n"
@@ -119,10 +129,10 @@ class AdvancedDataFetcher:
                     if isinstance(sma20, float) and isinstance(current_close, float):
                         div_val = ((current_close - sma20) / sma20) * 100
                         divergence_20 = f"{div_val:+.2f}%"
-                        sma20 = f"${sma20:.2f}"
+                        sma20 = f"{sma20:.2f} {currency}"
                         
-                    if isinstance(sma50, float): sma50 = f"${sma50:.2f}"
-                    if isinstance(sma200, float): sma200 = f"${sma200:.2f}"
+                    if isinstance(sma50, float): sma50 = f"{sma50:.2f} {currency}"
+                    if isinstance(sma200, float): sma200 = f"{sma200:.2f} {currency}"
 
                     vol_text = "N/A"
                     if 'Volume' in hist.columns:
@@ -177,16 +187,33 @@ class AdvancedDataFetcher:
                 return f"[{t_name}] 기본 데이터 수집 실패: {e}\n"
 
         # yfinance 호출 시 블로킹 방지
-        result = await asyncio.to_thread(fetch_sync, ticker) # type: ignore
-        return result
+        market_text = await asyncio.to_thread(fetch_sync, ticker) # type: ignore
+        return official_text + "\n" + market_text
 
-    def _format_market_cap(self, val):
+    async def _get_official_company_text(self, ticker: str) -> str:
+        sections = []
+        if self.sec_fetcher.is_supported_ticker(ticker):
+            sections.append(await asyncio.to_thread(self.sec_fetcher.render_official_fact_sheet, ticker))
+        if self.dart_fetcher.is_supported_ticker(ticker):
+            sections.append(await asyncio.to_thread(self.dart_fetcher.render_official_fact_sheet, ticker))
+        if self.krx_kind_checker.is_supported_ticker(ticker):
+            sections.append(self.krx_kind_checker.render_market_integrity_note(ticker))
+        if sections:
+            return "\n".join(sections)
+        label = str(ticker or "").strip().upper()
+        return (
+            f"**[공식 기업 데이터: {label}]**\n"
+            "- 현재 내장 공식 provider(SEC EDGAR/OpenDART)로 지원되지 않는 티커입니다.\n"
+            "- 실제 투자 전 해당 거래소, 감독기관 공시, 기업 IR, 브로커 원장을 별도 확인해야 합니다.\n"
+        )
+
+    def _format_market_cap(self, val, currency: str = "USD"):
         if not isinstance(val, (int, float)):
             return str(val)
         if val >= 1_000_000_000_000:
-            return f"${val/1_000_000_000_000:.2f}T (조 달러)"
+            return f"{val/1_000_000_000_000:.2f}T {currency}"
         elif val >= 1_000_000_000:
-            return f"${val/1_000_000_000:.2f}B (십억 달러)"
+            return f"{val/1_000_000_000:.2f}B {currency}"
         elif val >= 1_000_000:
-            return f"${val/1_000_000:.2f}M (백만 달러)"
-        return f"${val}"
+            return f"{val/1_000_000:.2f}M {currency}"
+        return f"{val} {currency}"

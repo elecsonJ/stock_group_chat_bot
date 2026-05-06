@@ -1,11 +1,13 @@
 from db_manager import DBManager
 from llm_client import LLMClientManager
 from json_utils import parse_json_object
+from news_context_pack import NewsContextPackService
 
 class RAGAgent:
     def __init__(self, llm_manager: LLMClientManager):
         self.llm = llm_manager
         self.db = DBManager()
+        self.news_context = NewsContextPackService(self.db)
 
     async def answer_question(self, user_question: str) -> str:
         """
@@ -21,7 +23,10 @@ class RAGAgent:
             "{\"keywords\": [\"키워드1\", \"키워드2\", \"키워드3\"]}"
         )
         
-        extract_res = await self.llm.get_local_response(extract_prompt, user_question)
+        try:
+            extract_res = await self.llm.get_local_response(extract_prompt, user_question, profile="extract")
+        except Exception:
+            extract_res = ""
         
         keywords = []
         try:
@@ -72,12 +77,7 @@ class RAGAgent:
         # FTS 결과가 부족하면 LIKE fallback
         if len(retrieved_contexts) < 3:
             for kw in keywords:
-                kw_like = f"%{kw}%"
-                self.db.cursor.execute(
-                    "SELECT date, topic, investment_json FROM debates WHERE topic LIKE ? OR investment_json LIKE ? ORDER BY id DESC LIMIT 10",
-                    (kw_like, kw_like),
-                )
-                rows = self.db.cursor.fetchall()
+                rows = self.db.search_debates_like(kw, limit=10)
                 for r in rows:
                     date, topic, inv_json = r
                     context_str = f"[{date}] 토론 주제: {topic}\n[토론 결과 및 판결문]: {inv_json}"
@@ -85,17 +85,23 @@ class RAGAgent:
                         retrieved_contexts.append(context_str)
 
             for kw in keywords:
-                kw_like = f"%{kw}%"
-                self.db.cursor.execute(
-                    "SELECT target_date, summary_type, summary_text FROM summaries WHERE summary_text LIKE ? OR keywords LIKE ? ORDER BY id DESC LIMIT 10",
-                    (kw_like, kw_like),
-                )
-                rows = self.db.cursor.fetchall()
+                rows = self.db.search_summaries_like(kw, limit=10)
                 for r in rows:
                     target_date, sum_type, text = r
                     context_str = f"[{target_date} {sum_type} 요약]: {text}"
                     if context_str not in retrieved_contexts:
                         retrieved_contexts.append(context_str)
+
+        context_pack = self.news_context.build_for_query(
+            query=user_question,
+            extra_terms=keywords,
+            event_limit=5,
+            evidence_limit=4,
+            lookback_hours=120,
+        )
+        for ctx in self.news_context.render_rag_contexts(context_pack):
+            if ctx not in retrieved_contexts:
+                retrieved_contexts.append(ctx)
 
         # 3. 검색된 맥락 최적화 및 토큰 엄격 통제 (최대 5개, 각각 핵심만 자름)
         retrieved_contexts = retrieved_contexts[:5]
@@ -129,7 +135,7 @@ class RAGAgent:
         user_prompt = f"<CONTEXT_BLOCK>\n{combined_context}\n</CONTEXT_BLOCK>\n\n[사용자 질문]: {user_question}"
         
         print(f"[RAG] 로컬 모델 지식 합성 중... (Context chunk count: {len(retrieved_contexts)})")
-        final_answer = await self.llm.get_local_response(sys_prompt, user_prompt)
+        final_answer = await self.llm.get_local_response(sys_prompt, user_prompt, profile="rag_answer")
         
         # UI 출력 포매팅
         formatted_answer = f"🔍 **[과거 회의록 스캔 안테나 가동]** (추출된 타겟 키워드: `{search_keyword_str}`)\n\n{final_answer}"

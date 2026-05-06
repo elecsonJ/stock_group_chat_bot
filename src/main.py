@@ -12,6 +12,10 @@ from db_manager import DBManager
 from data_fetcher.premium_crawler import PremiumCrawler
 from rag_agent import RAGAgent
 from portfolio_manager import PortfolioManager
+from signal_engine import SignalEngine
+from trading_executor import TradingExecutor
+from performance_tracker import PerformanceTracker
+from debate_job import score_debate_quality
 
 load_dotenv()
 
@@ -25,11 +29,20 @@ fact_checker = FactCheckAgent(llm_manager)
 db_manager = DBManager()
 rag_agent = RAGAgent(llm_manager)
 portfolio_manager = PortfolioManager()
+signal_engine = SignalEngine(db_manager)
+trading_executor = TradingExecutor(db_manager)
+performance_tracker = PerformanceTracker(db_manager)
 
 # 채널별 대화 기록(Context)을 저장하는 딕셔너리
 channel_memory = {}
 channel_portfolio_context = {}
 MAX_CHANNEL_HISTORY_CHARS = 120000
+
+def is_model_error_text(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    return lowered.startswith("error from gpt") or "circuitopen" in lowered
 
 
 async def send_chunked(channel, text: str, chunk_size: int = 1800):
@@ -179,6 +192,267 @@ async def portfolio_change_cmd(ctx):
         text += f"\n\n⚠️ 파싱 경고: {' | '.join(warnings[:3])}"
     await send_chunked(ctx, text)
 
+
+@bot.command(name="시그널")
+async def signal_cmd(ctx):
+    """
+    최신 뉴스 이벤트를 단기 시그널로 점수화하고 승인대기 목록을 생성합니다.
+    """
+    raw = portfolio_manager.load_raw_portfolio() or ""
+    holdings, _ = portfolio_manager.parse_holdings(raw) if raw else ([], [])
+    holdings_agg = portfolio_manager.aggregate_holdings(holdings)
+    portfolio_tickers = [h["ticker"] for h in holdings_agg]
+
+    signal_threshold = float(os.getenv("SIGNAL_MIN_SCORE", "58"))
+    signal_max_events = int(os.getenv("SIGNAL_MAX_EVENTS", "20"))
+    verify_new_only = os.getenv("SIGNAL_VERIFY_NEW_ONLY", "true").strip().lower() not in {"0", "false", "no"}
+    created = await signal_engine.generate_signals_from_news(
+        portfolio_tickers=portfolio_tickers,
+        max_events=signal_max_events,
+        threshold=signal_threshold,
+        checker=fact_checker,
+        verify_new_only=verify_new_only,
+    )
+    created_new = sum(1 for c in created if c.get("new"))
+    actionable = sum(1 for c in created if c.get("status") == "pending_approval")
+    debate_queued = sum(1 for c in created if (c.get("debate_queue") or {}).get("created") or (c.get("debate_queue") or {}).get("merged"))
+    review_triggered = sum(len(c.get("review_triggers", [])) for c in created)
+    header = (
+        "⚡ **[단기 시그널 생성 완료]**\n"
+        f"- 신규 이벤트: {created_new}\n"
+        f"- 생성 이벤트: {len(created)}\n"
+        f"- 승인대기: {actionable}\n\n"
+        f"- 자동 토론 큐 반영: {debate_queued}\n"
+        f"- 투자 변화 트리거: {review_triggered}\n\n"
+    )
+    body = signal_engine.render_signal_list_text(limit=12)
+    await send_chunked(ctx, header + body)
+
+
+@bot.command(name="시그널상세")
+async def signal_detail_cmd(ctx, event_id: str):
+    """
+    시그널 상세(점수/추천/승인상태)를 조회합니다.
+    """
+    txt = signal_engine.render_signal_detail_text(event_id.strip().upper())
+    await send_chunked(ctx, txt)
+
+
+@bot.command(name="승인목록")
+async def approval_list_cmd(ctx):
+    db_manager.mark_expired_approvals()
+    rows = db_manager.list_pending_approvals(limit=15)
+    if not rows:
+        await ctx.send("📭 현재 승인 대기 이벤트가 없습니다.")
+        return
+    lines = ["📝 **[승인 대기 목록]**"]
+    for r in rows:
+        lines.append(
+            f"- `{r['event_id']}` | score={r['score_total']:.1f} | {r['direction']}/{r['urgency']} | expires={r['expires_at'] or '-'}"
+        )
+        lines.append(f"  {r['title']}")
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="토론큐")
+async def debate_queue_cmd(ctx):
+    rows = db_manager.list_debate_queue(limit=15, statuses=["needs_review", "pending", "processing"])
+    if not rows:
+        await ctx.send("📭 현재 자동 토론 큐가 비어 있습니다.")
+        return
+    lines = ["🧠 **[자동 토론 큐]**"]
+    for row in rows:
+        lines.append(
+            f"- `{row['event_id']}` | {row['status']} | priority={row['priority']} | "
+            f"{row['direction']}/{row['urgency']} | ticker={row.get('ticker') or '-'}"
+        )
+        gate = row.get("cost_gate_status") or "-"
+        lines.append(f"  reason={row.get('reason') or '-'} | gate={gate}")
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="토론승인")
+async def debate_approve_cmd(ctx, event_id: str):
+    eid = event_id.strip().upper()
+    ok = db_manager.set_debate_queue_status(eid, "pending", note=f"discord approved by {ctx.author}")
+    if not ok:
+        await ctx.send(f"⚠️ 자동 토론 승인 실패: `{eid}`")
+        return
+    await ctx.send(f"✅ 자동 토론 승인 완료: `{eid}`. 다음 `run_debates.bat` 실행 시 처리됩니다.")
+
+
+@bot.command(name="토론보류")
+async def debate_hold_cmd(ctx, event_id: str):
+    eid = event_id.strip().upper()
+    ok = db_manager.set_debate_queue_status(eid, "held", note=f"discord held by {ctx.author}")
+    if not ok:
+        await ctx.send(f"⚠️ 자동 토론 보류 실패: `{eid}`")
+        return
+    await ctx.send(f"⏸️ 자동 토론 보류 완료: `{eid}`")
+
+
+@bot.command(name="토론기록")
+async def debate_history_cmd(ctx):
+    rows = db_manager.list_recent_debates(limit=10)
+    if not rows:
+        await ctx.send("📭 저장된 토론 기록이 없습니다.")
+        return
+    lines = ["📚 **[최근 토론 기록]**"]
+    for row in rows:
+        topic = str(row.get("topic") or "").replace("\n", " ").strip()
+        if len(topic) > 140:
+            topic = topic[:137] + "..."
+        lines.append(
+            f"- `#{row['id']}` | {row.get('date') or '-'} | {row.get('consensus_status') or '-'}"
+        )
+        quality = db_manager.get_debate_quality_score(int(row["id"]))
+        if quality:
+            lines[-1] += f" | quality={quality.get('status')} {quality.get('total_score'):.1f}"
+        lines.append(f"  {topic}")
+    lines.append("\n`!토론로그 <id>`로 저장된 전체 로그 일부를 확인할 수 있습니다.")
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="토론로그")
+async def debate_log_cmd(ctx, debate_id: int):
+    row = db_manager.get_debate(int(debate_id))
+    if not row:
+        await ctx.send(f"⚠️ 토론 기록을 찾지 못했습니다: `#{debate_id}`")
+        return
+    max_chars = max(2000, int(os.getenv("DISCORD_DEBATE_LOG_CHARS", "12000")))
+    full_log = str(row.get("full_log") or "")
+    clipped = full_log[-max_chars:]
+    header = (
+        f"📜 **[토론 로그 #{row['id']}]**\n"
+        f"- date: {row.get('date') or '-'}\n"
+        f"- status: {row.get('consensus_status') or '-'}\n"
+        f"- topic: {str(row.get('topic') or '').replace(chr(10), ' ')[:500]}\n"
+        f"- 표시 범위: 마지막 {len(clipped)}자 / 전체 {len(full_log)}자\n\n"
+    )
+    quality = db_manager.get_debate_quality_score(int(debate_id))
+    if quality:
+        detail = quality.get("detail_json", {}) or {}
+        header += (
+            f"- quality: {quality.get('status')} score={quality.get('total_score'):.1f}\n"
+            f"- missing: {', '.join(detail.get('missing', [])) or '-'}\n\n"
+        )
+    await send_chunked(ctx, header + "```text\n" + clipped[-max_chars:] + "\n```")
+
+
+@bot.command(name="토론품질")
+async def debate_quality_cmd(ctx, debate_id: int):
+    quality = db_manager.get_debate_quality_score(int(debate_id))
+    if not quality:
+        await ctx.send(f"⚠️ 토론 품질 점수가 없습니다: `#{debate_id}`")
+        return
+    detail = quality.get("detail_json", {}) or {}
+    checks = detail.get("checks", {}) or {}
+    lines = [
+        f"🧪 **[토론 품질 점수 #{debate_id}]**",
+        f"- status: {quality.get('status')} | score={quality.get('total_score'):.1f}",
+        f"- event_id: {quality.get('event_id') or '-'} | scored_at={quality.get('scored_at')}",
+    ]
+    for key, passed in checks.items():
+        lines.append(f"- {key}: {'PASS' if passed else 'MISS'}")
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="성과")
+async def performance_cmd(ctx):
+    summary = performance_tracker.summarize(limit=500)
+    rows = db_manager.list_signal_performance(limit=8)
+    lines = [
+        "📈 **[시그널 성과 요약]**",
+        f"- count: {summary.get('count', 0)}",
+        f"- win_rate: {summary.get('win_rate', 0.0) * 100:.1f}%",
+        f"- avg_return: {summary.get('avg_return_pct', 0.0):+.2f}%",
+        f"- avg_alpha: {summary.get('avg_alpha_pct', 0.0):+.2f}%",
+        f"- expectancy: {summary.get('expectancy_pct', 0.0):+.2f}%",
+    ]
+    if rows:
+        lines.append("\n최근 측정:")
+        for row in rows:
+            lines.append(
+                f"- `{row['event_id']}` {row['ticker']} {row['horizon']} "
+                f"ret={row['return_pct']:+.2f}% alpha={row['alpha_pct']:+.2f}%"
+            )
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="변화트리거")
+async def review_trigger_cmd(ctx):
+    rows = db_manager.list_investment_review_triggers(limit=15, statuses=["open"])
+    if not rows:
+        await ctx.send("📭 현재 열린 투자 변화 트리거가 없습니다.")
+        return
+    lines = ["📎 **[투자 변화 트리거]**"]
+    for row in rows:
+        lines.append(
+            f"- `#{row['id']}` | `{row['event_id']}` | {row['ticker'] or '-'} {row['trigger_type']} | "
+            f"priority={row['priority']} | status={row['status']}"
+        )
+        lines.append(f"  {row['summary']}")
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="승인")
+async def approve_cmd(ctx, event_id: str):
+    """
+    승인 대기 이벤트를 승인하고 즉시 페이퍼 체결합니다.
+    """
+    eid = event_id.strip().upper()
+    ok = db_manager.approve_request(eid, approved_by=str(ctx.author), note="discord manual approve")
+    if not ok:
+        await ctx.send(f"⚠️ 승인 실패: `{eid}` (대기 상태가 아니거나 이벤트 없음)")
+        return
+    done, msg = trading_executor.execute_paper(eid, approved_by=str(ctx.author))
+    await ctx.send(msg if done else f"승인은 되었지만 실행 실패: {msg}")
+
+
+@bot.command(name="거부")
+async def reject_cmd(ctx, event_id: str):
+    """
+    승인 대기 이벤트를 거부합니다.
+    """
+    eid = event_id.strip().upper()
+    ok = db_manager.reject_request(eid, rejected_by=str(ctx.author), note="discord manual reject")
+    if not ok:
+        await ctx.send(f"⚠️ 거부 실패: `{eid}` (대기 상태가 아니거나 이벤트 없음)")
+        return
+    db_manager.set_recommendations_status(eid, "rejected")
+    db_manager.set_signal_event_status(eid, "rejected")
+    await ctx.send(f"🛑 거부 완료: `{eid}`")
+
+
+@bot.command(name="자동매매중지")
+async def kill_switch_on_cmd(ctx):
+    db_manager.set_kill_switch(True)
+    await ctx.send("🧯 자동매매 중지(kill_switch=ON)로 변경했습니다.")
+
+
+@bot.command(name="자동매매재개")
+async def kill_switch_off_cmd(ctx):
+    db_manager.set_kill_switch(False)
+    state = db_manager.get_guardrail_state()
+    await ctx.send(
+        "✅ 자동매매 재개(kill_switch=OFF).\n"
+        f"- daily_limit={state.get('daily_order_limit')}, hourly_limit={state.get('hourly_order_limit')}, "
+        f"daily_loss_limit={state.get('daily_loss_limit')}"
+    )
+
+
+@bot.command(name="가드레일")
+async def guardrail_cmd(ctx):
+    state = db_manager.get_guardrail_state()
+    await ctx.send(
+        "🛡️ **[리스크 가드레일 상태]**\n"
+        f"- kill_switch: {'ON' if state.get('kill_switch') else 'OFF'}\n"
+        f"- daily_order_limit: {state.get('daily_order_limit')}\n"
+        f"- hourly_order_limit: {state.get('hourly_order_limit')}\n"
+        f"- daily_loss_limit: {state.get('daily_loss_limit')}\n"
+        f"- updated_at: {state.get('updated_at')}"
+    )
+
 @bot.command()
 async def 토론(ctx, *, user_query: str):
     """
@@ -199,6 +473,8 @@ async def 토론(ctx, *, user_query: str):
     final_history, debate_id = await debate_controller.run_full_debate(
         ctx, user_query, portfolio_context=portfolio_context
     )
+    quality = score_debate_quality(final_history, debate_id=int(debate_id))
+    db_manager.save_debate_quality_score(quality)
     
     # ==========================
     # 결론 보류 및 저장 안내
@@ -206,6 +482,7 @@ async def 토론(ctx, *, user_query: str):
     await ctx.send(
         "💡 **[결론 및 임시 저장]**\n"
         "현재 라운드의 모든 발언(GPT, Claude, Gemini)과 로컬 gpt-oss-20b의 교차 검증 결과 등 토론 전체의 맥락이 봇의 단기 기억 공간에 저장되었습니다.\n"
+        f"토론 품질 점수: {quality['status']} ({quality['total_score']:.1f}/100)\n"
         "*(이제부터 !명령어 없이 일반 채팅을 치시면, AI가 이 문맥을 기억한 상태로 대화를 이어나갑니다!)*"
     )
     
@@ -246,6 +523,9 @@ async def on_message(message):
         
         # 컨텍스트를 모두 포함하여 GPT에게 답변 요청
         reply = await llm_manager.get_gpt_response(sys_prompt, mem["history"])
+        if is_model_error_text(reply):
+            await message.channel.send("⚠️ GPT 응답 생성에 실패했습니다. 잠시 후 다시 시도해주세요.")
+            return
         await message.channel.send(f"**[gpt-5.2-2025-12-11 응답 (이전 Context 유지)]**\n{reply}")
         
         # AI 다음 기억을 위해 자신이 한 대답도 추가

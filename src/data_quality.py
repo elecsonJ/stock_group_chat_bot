@@ -39,6 +39,8 @@ class DataQualityEvaluator:
         checkpoints = self._list_checkpoints()
         event_audits = self.db.list_event_intake_audits(limit=limit)
         context_audits = self.db.list_context_selection_audits(limit=limit)
+        market_reactions = self.db.list_market_reaction_snapshots(limit=limit)
+        reconciliations = self.db.list_reconciliation_runs(limit=10)
 
         latest_news_at = self._max_dt(
             [e.get("updated_at") or e.get("date") for e in events]
@@ -98,6 +100,8 @@ class DataQualityEvaluator:
             "verification": round(min(100.0, verification_coverage * 70.0 + min(avg_evidence_per_signal, 4.0) / 4.0 * 30.0), 2),
             "management": self._management_score(orphan_event_ratio, article_url_dupe_ratio, checkpoint_failures),
             "performance_feedback": round(performance_coverage * 100.0, 2),
+            "market_reaction": round(min(100.0, (len(market_reactions) / max(1, signal_count)) * 100.0), 2) if signal_count else 0.0,
+            "reconciliation": 100.0 if reconciliations and reconciliations[0].get("status") == "ok" else 0.0,
         }
         overall = round(
             scores["freshness"] * 0.2
@@ -105,7 +109,9 @@ class DataQualityEvaluator:
             + scores["source_quality"] * 0.18
             + scores["verification"] * 0.18
             + scores["management"] * 0.14
-            + scores["performance_feedback"] * 0.10,
+            + scores["performance_feedback"] * 0.06
+            + scores["market_reaction"] * 0.03
+            + scores["reconciliation"] * 0.01,
             2,
         )
 
@@ -124,6 +130,8 @@ class DataQualityEvaluator:
                 "performance_measurement_count": len(performance),
                 "event_intake_audit_count": len(event_audits),
                 "context_selection_audit_count": len(context_audits),
+                "market_reaction_snapshot_count": len(market_reactions),
+                "reconciliation_run_count": len(reconciliations),
                 "latest_news_at": latest_news_at.strftime("%Y-%m-%dT%H:%M:%S") if latest_news_at else None,
                 "latest_research_at": latest_research_at.strftime("%Y-%m-%dT%H:%M:%S") if latest_research_at else None,
                 "latest_pack_at": latest_pack_at.strftime("%Y-%m-%dT%H:%M:%S") if latest_pack_at else None,
@@ -143,6 +151,8 @@ class DataQualityEvaluator:
                 "performance_coverage": round(performance_coverage, 4),
                 "event_audit_coverage": round((len(event_audits) / max(1, event_count)), 4) if event_count else 0.0,
                 "context_audit_coverage": round((len(context_audits) / max(1, pack_count)), 4) if pack_count else 0.0,
+                "market_reaction_coverage": round((len(market_reactions) / max(1, signal_count)), 4) if signal_count else 0.0,
+                "latest_reconciliation_status": reconciliations[0].get("status") if reconciliations else "missing",
                 "checkpoint_failure_count": len(checkpoint_failures),
             },
             "recommendations": self._recommendations(scores, event_count, article_count, research_count, pack_count, verification_coverage, performance_coverage, high_quality_article_ratio, checkpoint_failures, len(event_audits), len(context_audits)),
@@ -158,10 +168,12 @@ class DataQualityEvaluator:
             f"- freshness={scores.get('freshness', 0.0):.1f} coverage={scores.get('coverage', 0.0):.1f} "
             f"source={scores.get('source_quality', 0.0):.1f} verification={scores.get('verification', 0.0):.1f} "
             f"management={scores.get('management', 0.0):.1f} feedback={scores.get('performance_feedback', 0.0):.1f}",
+            f"- market_reaction={scores.get('market_reaction', 0.0):.1f} reconciliation={scores.get('reconciliation', 0.0):.1f}",
             f"- events={collection.get('event_count', 0)} articles={collection.get('article_count', 0)} "
             f"research={collection.get('research_count', 0)} packs={collection.get('news_context_pack_count', 0)} "
             f"signals={collection.get('signal_count', 0)} measurements={collection.get('performance_measurement_count', 0)}",
-            f"- audits: event_intake={collection.get('event_intake_audit_count', 0)} context_selection={collection.get('context_selection_audit_count', 0)}",
+            f"- audits: event_intake={collection.get('event_intake_audit_count', 0)} context_selection={collection.get('context_selection_audit_count', 0)} "
+            f"market_reactions={collection.get('market_reaction_snapshot_count', 0)} reconciliations={collection.get('reconciliation_run_count', 0)}",
             f"- latest_news={collection.get('latest_news_at') or '-'} | latest_research={collection.get('latest_research_at') or '-'} | latest_pack={collection.get('latest_pack_at') or '-'}",
             f"- avg_articles/event={quality.get('avg_articles_per_event', 0.0)} | high_quality_articles={quality.get('high_quality_article_ratio', 0.0) * 100:.1f}% | "
             f"verified_signals={quality.get('verification_coverage', 0.0) * 100:.1f}% | performance_coverage={quality.get('performance_coverage', 0.0) * 100:.1f}%",

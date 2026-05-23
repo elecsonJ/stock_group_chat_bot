@@ -28,6 +28,15 @@ class TradingExecutor:
         quote = self.market_data.get_latest_quote(ticker)
         return float(quote.price) if quote else 0.0
 
+    def _fetch_price_with_quality(self, ticker: str) -> tuple[float, dict]:
+        quote = self.market_data.get_latest_quote(ticker)
+        if quote:
+            return float(quote.price), self.market_data.assess_quote_quality(quote)
+        px = self._fetch_price(ticker)
+        if px > 0:
+            return px, {"state": "reference", "tradable": True, "source": "override_or_test_provider"}
+        return 0.0, {"state": "missing", "tradable": False, "reasons": ["missing_quote"]}
+
     def _fetch_market_context(self, ticker: str) -> dict[str, float]:
         if yf is None:
             return {}
@@ -92,9 +101,11 @@ class TradingExecutor:
         market_contexts: dict[str, dict[str, float]] = {}
         for r in actionable:
             ticker = r.get("ticker", "")
-            px = self._fetch_price(ticker)
+            px, quality = self._fetch_price_with_quality(ticker)
             if px <= 0:
                 return False, f"❌ 가격 조회 실패로 실행 중단: `{ticker}`"
+            if str(quality.get("state", "")).lower() in {"missing", "stale"}:
+                return False, f"market data quality gate failed: `{ticker}` ({quality})"
             prices[ticker] = px
             market_contexts[ticker] = self._fetch_market_context(ticker)
 

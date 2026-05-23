@@ -94,6 +94,21 @@ class PerformanceTrackerTests(unittest.TestCase):
                 "detail_json": {"missing": []},
             }
         )
+        self.db.save_market_reaction_snapshot(
+            {
+                "event_id": event_id,
+                "event_key": "EVT-FEEDBACK-1",
+                "ticker": "NVDA",
+                "event_time": "2026-04-05T09:00:00",
+                "benchmark_ticker": "SPY",
+                "event_price": 100.0,
+                "post_60m_price": 103.0,
+                "relative_post_60m_pct": 2.5,
+                "pre_news_move_pct": 0.2,
+                "already_priced_in": False,
+                "market_data_quality": "reference",
+            }
+        )
         measurement = self.tracker.record_measurement(
             event_id=event_id,
             ticker="NVDA",
@@ -113,6 +128,7 @@ class PerformanceTrackerTests(unittest.TestCase):
         self.assertIn("signal_score_bucket", categories)
         self.assertIn("source_tier", categories)
         self.assertIn("debate_quality_status", categories)
+        self.assertIn("relative_post_60m_bucket", categories)
 
         report = self.tracker.build_feedback_report(horizon="1d", min_samples=1)
         self.assertEqual(report["schema_version"], "performance_feedback.v1")

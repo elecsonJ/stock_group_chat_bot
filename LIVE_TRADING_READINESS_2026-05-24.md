@@ -215,6 +215,35 @@ The user must decide:
 6. Role-restricted Discord execution controls
 7. Tiny-live rollout checklist
 
+## Implemented Local Hardening (2026-05-24)
+
+These items can run without external broker credentials:
+
+- `src/market_reaction.py`
+  - Captures event-window price reaction snapshots for signal events.
+  - Stores pre/post event price moves, benchmark-relative return, and an `already_priced_in` flag.
+- `src/market_reaction_job.py` and `run_market_reaction.bat`
+  - Batch entry point for filling market reaction snapshots.
+- `MarketDataProvider.assess_quote_quality`
+  - Adds a basic market data quality/staleness gate.
+- `TradingExecutor`
+  - Blocks paper execution when market data is missing or stale.
+- `src/reconciliation.py`
+  - Checks paper account, positions, orders, and fills for internal state mismatch.
+- `src/reconciliation_job.py` and `run_reconciliation.bat`
+  - Batch entry point for reconciliation.
+- `src/live_readiness_check.py` and `run_live_readiness_check.bat`
+  - Reports DB, kill switch, environment, reconciliation, recent data, and optional market data status.
+- Discord operator guard
+  - Dangerous execution commands can be restricted with `DISCORD_OPERATOR_USER_IDS`.
+
+Current local validation:
+
+```text
+python -m pytest -q
+46 passed, 2 skipped
+```
+
 ## Go/No-Go Rule
 
 The system can move to sandbox trading when:

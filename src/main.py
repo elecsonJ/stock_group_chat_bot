@@ -17,6 +17,8 @@ from trading_executor import TradingExecutor
 from performance_tracker import PerformanceTracker
 from debate_job import score_debate_quality
 from data_quality import DataQualityEvaluator
+from live_readiness_check import LiveReadinessChecker
+from reconciliation import PaperStateReconciler
 
 load_dotenv()
 
@@ -34,6 +36,8 @@ signal_engine = SignalEngine(db_manager)
 trading_executor = TradingExecutor(db_manager)
 performance_tracker = PerformanceTracker(db_manager)
 data_quality_evaluator = DataQualityEvaluator(db_manager)
+readiness_checker = LiveReadinessChecker(db_manager)
+paper_reconciler = PaperStateReconciler(db_manager)
 
 # 채널별 대화 기록(Context)을 저장하는 딕셔너리
 channel_memory = {}
@@ -45,6 +49,21 @@ def is_model_error_text(text: str) -> bool:
     if not lowered:
         return True
     return lowered.startswith("error from gpt") or "circuitopen" in lowered
+
+
+def _operator_ids() -> set[str]:
+    raw = os.getenv("DISCORD_OPERATOR_USER_IDS", "").strip()
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+async def require_operator(ctx) -> bool:
+    allowed = _operator_ids()
+    if not allowed:
+        return True
+    if str(ctx.author.id) in allowed:
+        return True
+    await ctx.send("권한 없음: 이 명령은 DISCORD_OPERATOR_USER_IDS에 등록된 사용자만 실행할 수 있습니다.")
+    return False
 
 
 async def send_chunked(channel, text: str, chunk_size: int = 1800):
@@ -275,6 +294,8 @@ async def debate_queue_cmd(ctx):
 
 @bot.command(name="토론승인")
 async def debate_approve_cmd(ctx, event_id: str):
+    if not await require_operator(ctx):
+        return
     eid = event_id.strip().upper()
     ok = db_manager.set_debate_queue_status(eid, "pending", note=f"discord approved by {ctx.author}")
     if not ok:
@@ -285,6 +306,8 @@ async def debate_approve_cmd(ctx, event_id: str):
 
 @bot.command(name="토론보류")
 async def debate_hold_cmd(ctx, event_id: str):
+    if not await require_operator(ctx):
+        return
     eid = event_id.strip().upper()
     ok = db_manager.set_debate_queue_status(eid, "held", note=f"discord held by {ctx.author}")
     if not ok:
@@ -395,6 +418,20 @@ async def data_quality_cmd(ctx, lookback_hours: int = 168):
     await send_chunked(ctx, data_quality_evaluator.render(report))
 
 
+@bot.command(name="readiness")
+async def readiness_cmd(ctx):
+    report = readiness_checker.run(include_network=False)
+    await send_chunked(ctx, readiness_checker.render(report))
+
+
+@bot.command(name="reconcile")
+async def reconcile_cmd(ctx):
+    if not await require_operator(ctx):
+        return
+    report = paper_reconciler.run(persist=True)
+    await send_chunked(ctx, paper_reconciler.render(report))
+
+
 @bot.command(name="이벤트감사")
 async def event_audit_cmd(ctx, event_id: str = ""):
     rows = db_manager.list_event_intake_audits(event_id=event_id.strip().upper() or None, limit=10)
@@ -460,6 +497,8 @@ async def approve_cmd(ctx, event_id: str):
     """
     승인 대기 이벤트를 승인하고 즉시 페이퍼 체결합니다.
     """
+    if not await require_operator(ctx):
+        return
     eid = event_id.strip().upper()
     ok = db_manager.approve_request(eid, approved_by=str(ctx.author), note="discord manual approve")
     if not ok:
@@ -474,6 +513,8 @@ async def reject_cmd(ctx, event_id: str):
     """
     승인 대기 이벤트를 거부합니다.
     """
+    if not await require_operator(ctx):
+        return
     eid = event_id.strip().upper()
     ok = db_manager.reject_request(eid, rejected_by=str(ctx.author), note="discord manual reject")
     if not ok:
@@ -486,12 +527,16 @@ async def reject_cmd(ctx, event_id: str):
 
 @bot.command(name="자동매매중지")
 async def kill_switch_on_cmd(ctx):
+    if not await require_operator(ctx):
+        return
     db_manager.set_kill_switch(True)
     await ctx.send("🧯 자동매매 중지(kill_switch=ON)로 변경했습니다.")
 
 
 @bot.command(name="자동매매재개")
 async def kill_switch_off_cmd(ctx):
+    if not await require_operator(ctx):
+        return
     db_manager.set_kill_switch(False)
     state = db_manager.get_guardrail_state()
     await ctx.send(

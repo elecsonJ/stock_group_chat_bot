@@ -423,6 +423,49 @@ class DBManager:
         )
         self.cursor.execute(
             '''
+            CREATE TABLE IF NOT EXISTS market_reaction_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT,
+                event_key TEXT,
+                ticker TEXT,
+                event_time TEXT,
+                captured_at TEXT,
+                benchmark_ticker TEXT,
+                sector_ticker TEXT,
+                pre_60m_price REAL,
+                pre_30m_price REAL,
+                pre_5m_price REAL,
+                event_price REAL,
+                post_5m_price REAL,
+                post_30m_price REAL,
+                post_60m_price REAL,
+                post_1d_price REAL,
+                pre_news_move_pct REAL,
+                post_60m_move_pct REAL,
+                post_1d_move_pct REAL,
+                benchmark_post_60m_pct REAL,
+                relative_post_60m_pct REAL,
+                volume_zscore REAL,
+                already_priced_in INTEGER,
+                market_data_quality TEXT,
+                detail_json TEXT
+            )
+            '''
+        )
+        self.cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS reconciliation_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_type TEXT,
+                status TEXT,
+                mismatch_count INTEGER,
+                checked_at TEXT,
+                detail_json TEXT
+            )
+            '''
+        )
+        self.cursor.execute(
+            '''
             CREATE TABLE IF NOT EXISTS event_intake_audits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT,
@@ -485,6 +528,8 @@ class DBManager:
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_orders_event_status ON paper_orders(event_id, status)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_fills_event_time ON paper_fills(event_id, filled_at)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_signal_perf_event_horizon ON signal_performance(event_id, horizon)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_market_reaction_event ON market_reaction_snapshots(event_id, ticker, captured_at)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_time ON reconciliation_runs(run_type, checked_at)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_perf_run_name_split ON performance_run_summaries(run_name, split_label, horizon)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_signal_attr_event_horizon ON signal_attributions(event_id, horizon, category)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_debate_queue_status_priority ON debate_queue(status, priority, requested_at)')
@@ -1749,6 +1794,137 @@ class DBManager:
             ),
         )
         self.conn.commit()
+
+    def save_market_reaction_snapshot(self, row: dict):
+        self.cursor.execute(
+            '''
+            INSERT INTO market_reaction_snapshots (
+                event_id, event_key, ticker, event_time, captured_at, benchmark_ticker, sector_ticker,
+                pre_60m_price, pre_30m_price, pre_5m_price, event_price, post_5m_price,
+                post_30m_price, post_60m_price, post_1d_price, pre_news_move_pct,
+                post_60m_move_pct, post_1d_move_pct, benchmark_post_60m_pct,
+                relative_post_60m_pct, volume_zscore, already_priced_in,
+                market_data_quality, detail_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                row.get("event_id"),
+                row.get("event_key"),
+                row.get("ticker"),
+                row.get("event_time"),
+                row.get("captured_at") or datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+                row.get("benchmark_ticker"),
+                row.get("sector_ticker"),
+                float(row.get("pre_60m_price", 0.0) or 0.0),
+                float(row.get("pre_30m_price", 0.0) or 0.0),
+                float(row.get("pre_5m_price", 0.0) or 0.0),
+                float(row.get("event_price", 0.0) or 0.0),
+                float(row.get("post_5m_price", 0.0) or 0.0),
+                float(row.get("post_30m_price", 0.0) or 0.0),
+                float(row.get("post_60m_price", 0.0) or 0.0),
+                float(row.get("post_1d_price", 0.0) or 0.0),
+                float(row.get("pre_news_move_pct", 0.0) or 0.0),
+                float(row.get("post_60m_move_pct", 0.0) or 0.0),
+                float(row.get("post_1d_move_pct", 0.0) or 0.0),
+                float(row.get("benchmark_post_60m_pct", 0.0) or 0.0),
+                float(row.get("relative_post_60m_pct", 0.0) or 0.0),
+                float(row.get("volume_zscore", 0.0) or 0.0),
+                1 if row.get("already_priced_in") else 0,
+                row.get("market_data_quality", "unknown"),
+                json.dumps(row.get("detail_json", {}), ensure_ascii=False),
+            ),
+        )
+        self.conn.commit()
+
+    def list_market_reaction_snapshots(self, event_id: str | None = None, ticker: str | None = None, limit: int = 100) -> list[dict]:
+        sql = (
+            "SELECT event_id, event_key, ticker, event_time, captured_at, benchmark_ticker, sector_ticker, "
+            "pre_60m_price, pre_30m_price, pre_5m_price, event_price, post_5m_price, post_30m_price, "
+            "post_60m_price, post_1d_price, pre_news_move_pct, post_60m_move_pct, post_1d_move_pct, "
+            "benchmark_post_60m_pct, relative_post_60m_pct, volume_zscore, already_priced_in, "
+            "market_data_quality, detail_json FROM market_reaction_snapshots WHERE 1=1"
+        )
+        params: list[object] = []
+        if event_id:
+            sql += " AND event_id = ?"
+            params.append(event_id)
+        if ticker:
+            sql += " AND ticker = ?"
+            params.append(ticker)
+        sql += " ORDER BY captured_at DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        self.cursor.execute(sql, params)
+        out = []
+        for row in self.cursor.fetchall():
+            out.append(
+                {
+                    "event_id": row[0],
+                    "event_key": row[1],
+                    "ticker": row[2],
+                    "event_time": row[3],
+                    "captured_at": row[4],
+                    "benchmark_ticker": row[5],
+                    "sector_ticker": row[6],
+                    "pre_60m_price": float(row[7] or 0.0),
+                    "pre_30m_price": float(row[8] or 0.0),
+                    "pre_5m_price": float(row[9] or 0.0),
+                    "event_price": float(row[10] or 0.0),
+                    "post_5m_price": float(row[11] or 0.0),
+                    "post_30m_price": float(row[12] or 0.0),
+                    "post_60m_price": float(row[13] or 0.0),
+                    "post_1d_price": float(row[14] or 0.0),
+                    "pre_news_move_pct": float(row[15] or 0.0),
+                    "post_60m_move_pct": float(row[16] or 0.0),
+                    "post_1d_move_pct": float(row[17] or 0.0),
+                    "benchmark_post_60m_pct": float(row[18] or 0.0),
+                    "relative_post_60m_pct": float(row[19] or 0.0),
+                    "volume_zscore": float(row[20] or 0.0),
+                    "already_priced_in": bool(int(row[21] or 0)),
+                    "market_data_quality": row[22],
+                    "detail_json": json.loads(row[23]) if row[23] else {},
+                }
+            )
+        return out
+
+    def save_reconciliation_run(self, row: dict):
+        self.cursor.execute(
+            '''
+            INSERT INTO reconciliation_runs (
+                run_type, status, mismatch_count, checked_at, detail_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ''',
+            (
+                row.get("run_type", "paper"),
+                row.get("status", "unknown"),
+                int(row.get("mismatch_count", 0) or 0),
+                row.get("checked_at") or datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+                json.dumps(row.get("detail_json", {}), ensure_ascii=False),
+            ),
+        )
+        self.conn.commit()
+
+    def list_reconciliation_runs(self, limit: int = 20) -> list[dict]:
+        self.cursor.execute(
+            '''
+            SELECT run_type, status, mismatch_count, checked_at, detail_json
+            FROM reconciliation_runs
+            ORDER BY checked_at DESC, id DESC
+            LIMIT ?
+            ''',
+            (int(limit),),
+        )
+        out = []
+        for row in self.cursor.fetchall():
+            out.append(
+                {
+                    "run_type": row[0],
+                    "status": row[1],
+                    "mismatch_count": int(row[2] or 0),
+                    "checked_at": row[3],
+                    "detail_json": json.loads(row[4]) if row[4] else {},
+                }
+            )
+        return out
 
     def list_signal_performance(self, event_id: str | None = None, limit: int = 100) -> list[dict]:
         params: list[object] = []

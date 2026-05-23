@@ -139,6 +139,16 @@ class PerformanceTracker:
             for missing in (detail.get("missing", []) or [])[:8]:
                 payloads.append(("debate_quality_missing", str(missing), 1.0, {}))
 
+        reaction_rows = self.db.list_market_reaction_snapshots(event_id=event_id, ticker=ticker, limit=1) if event_id and ticker else []
+        if reaction_rows:
+            reaction = reaction_rows[0]
+            payloads.append(("market_reaction_quality", str(reaction.get("market_data_quality", "unknown")), 1.0, {}))
+            payloads.append(("already_priced_in", str(bool(reaction.get("already_priced_in", False))).lower(), 1.0, {}))
+            relative_move = float(reaction.get("relative_post_60m_pct", 0.0) or 0.0)
+            pre_move = float(reaction.get("pre_news_move_pct", 0.0) or 0.0)
+            payloads.append(("relative_post_60m_bucket", self._bucket_signed_pct(relative_move), 1.0, {"relative_post_60m_pct": relative_move}))
+            payloads.append(("pre_news_move_bucket", self._bucket_signed_pct(pre_move), 1.0, {"pre_news_move_pct": pre_move}))
+
         saved = []
         for category, label, weight, extra in payloads:
             row = {
@@ -314,6 +324,10 @@ class PerformanceTracker:
             "hidden_candidate_validation_bucket",
             "debate_quality_status",
             "debate_quality_missing",
+            "market_reaction_quality",
+            "already_priced_in",
+            "relative_post_60m_bucket",
+            "pre_news_move_bucket",
         ]
         overall = self.summarize(horizon=horizon, limit=limit)
         category_reports: dict[str, Any] = {}
@@ -497,6 +511,21 @@ class PerformanceTracker:
         if score > 0:
             return "1-9"
         return "0"
+
+    def _bucket_signed_pct(self, value: float) -> str:
+        if value >= 5:
+            return "up_5pct_plus"
+        if value >= 2:
+            return "up_2pct_plus"
+        if value > 0.5:
+            return "up_small"
+        if value <= -5:
+            return "down_5pct_plus"
+        if value <= -2:
+            return "down_2pct_plus"
+        if value < -0.5:
+            return "down_small"
+        return "flat"
 
     def _dedupe_latest(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         latest: dict[tuple[str, str, str, str], dict[str, Any]] = {}

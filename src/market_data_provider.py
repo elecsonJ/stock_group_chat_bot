@@ -42,6 +42,41 @@ class MarketDataProvider:
             return None
         return self._get_yfinance_latest_quote(ticker)
 
+    def assess_quote_quality(self, quote: PriceQuote | None, *, max_age_minutes: int = 30) -> dict[str, Any]:
+        if quote is None:
+            return {
+                "state": "missing",
+                "tradable": False,
+                "reasons": ["missing_quote"],
+            }
+        reasons = []
+        state = "reference"
+        as_of = self._parse_dt(quote.as_of)
+        if as_of:
+            age_min = max(0.0, (datetime.now() - as_of).total_seconds() / 60.0)
+            if age_min > max_age_minutes:
+                state = "stale"
+                reasons.append(f"stale_quote_{age_min:.1f}m")
+        else:
+            reasons.append("missing_as_of")
+        detail = quote.detail or {}
+        market_state = str(detail.get("market_state", "") or "").upper()
+        if market_state and market_state not in {"REGULAR", "OPEN"}:
+            reasons.append(f"market_state_{market_state.lower()}")
+        if quote.price <= 0:
+            state = "missing"
+            reasons.append("non_positive_price")
+        tradable = state not in {"missing", "stale"} and quote.price > 0
+        return {
+            "state": state,
+            "tradable": tradable,
+            "reasons": reasons,
+            "source": quote.source,
+            "quality": quote.quality,
+            "as_of": quote.as_of,
+            "price": quote.price,
+        }
+
     def get_historical_price(self, ticker: str, when: datetime) -> PriceQuote | None:
         if self.provider != "yfinance":
             return None
@@ -54,8 +89,18 @@ class MarketDataProvider:
         if not normalized:
             return None
         try:
-            info = yf.Ticker(normalized).info
+            ticker_obj = yf.Ticker(normalized)
+            info = ticker_obj.info
             px = info.get("currentPrice") or info.get("regularMarketPrice")
+            if not px or float(px) <= 0:
+                try:
+                    px = ticker_obj.fast_info.get("lastPrice")
+                except Exception:
+                    px = None
+            if not px or float(px) <= 0:
+                hist = ticker_obj.history(period="5d")
+                if hist is not None and not getattr(hist, "empty", True):
+                    px = hist.sort_index().iloc[-1].get("Close")
             if not px or float(px) <= 0:
                 return None
             return PriceQuote(
@@ -70,6 +115,12 @@ class MarketDataProvider:
                     "exchange": info.get("exchange"),
                 },
             )
+        except Exception:
+            return None
+
+    def _parse_dt(self, value: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
         except Exception:
             return None
 

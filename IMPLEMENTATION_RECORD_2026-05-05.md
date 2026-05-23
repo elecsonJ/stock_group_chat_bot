@@ -309,3 +309,29 @@ python -m pytest -q
 - Added `src/yfinance_runtime.py` so yfinance timezone cache is kept under `YFINANCE_CACHE_DIR` inside the project workspace.
 - Removed `pandas_ta` from core requirements and replaced the advanced fundamental fetcher's technical indicators with local pandas-based calculations to avoid install-time blockage.
 - Next market-data hardening target: persist event-window price/volume/benchmark reaction snapshots so news decisions can distinguish fresh information from already-priced-in moves.
+
+## 2026-05-24 Update: Pre-Live Local Hardening
+
+- Added event-window market reaction snapshots:
+  - `src/market_reaction.py`
+  - `src/market_reaction_job.py`
+  - `run_market_reaction.bat`
+- Added paper state reconciliation:
+  - `src/reconciliation.py`
+  - `src/reconciliation_job.py`
+  - `run_reconciliation.bat`
+- Added live readiness reporting:
+  - `src/live_readiness_check.py`
+  - `run_live_readiness_check.bat`
+- Added market data quality gates:
+  - `MarketDataProvider.assess_quote_quality`
+  - `TradingExecutor` now blocks execution when market data is missing or stale.
+- Added Discord operator guard:
+  - `DISCORD_OPERATOR_USER_IDS` restricts approval, debate queue mutation, and kill-switch commands when configured.
+- Extended data quality reporting with market reaction coverage and latest reconciliation status.
+- Validation:
+
+```text
+python -m pytest -q
+46 passed, 2 skipped
+```

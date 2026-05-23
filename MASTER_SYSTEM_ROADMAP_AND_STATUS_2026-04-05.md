@@ -3,6 +3,7 @@
 - Local LLM routing now supports profile-specific model overrides. Recommended operation is e4b for fast helper tasks and 31B for `evidence_verdict`, `judge`, and high-stakes evidence summaries.
 - Market data is connected through yfinance reference quotes and historical closes, but it is not yet a full investment-grade market reaction layer.
 - Remaining priority: create event-window market snapshots around each news event, including pre/post price move, volume spike, benchmark/sector-relative move, and whether the move preceded public news collection.
+- Live/sandbox readiness checklist: `LIVE_TRADING_READINESS_2026-05-24.md`.
 
 # Master System Roadmap And Status (2026-04-05)
 

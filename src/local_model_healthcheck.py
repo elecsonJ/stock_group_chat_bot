@@ -4,6 +4,7 @@ import os
 from time import monotonic
 
 from llm_client import LLMClientManager
+from json_utils import parse_json_object
 
 
 CASES = [
@@ -71,6 +72,79 @@ CASES = [
         ),
         "expect_json": False,
     },
+    {
+        "name": "claim_to_search",
+        "profile": "claim_search",
+        "system": (
+            "You are a claim-to-search planner. Return only strict JSON with claims, "
+            "search_queries, priority, required_sources, and reason."
+        ),
+        "prompt": (
+            "Claim: NVIDIA announced a new Middle East AI infrastructure contract that may affect 2026 revenue.\n"
+            "Return at most 3 search queries and do not make an investment conclusion."
+        ),
+        "expect_json": True,
+        "expect_keys": ["claims", "search_queries", "priority", "required_sources", "reason"],
+    },
+    {
+        "name": "evidence_verdict",
+        "profile": "evidence_verdict",
+        "system": (
+            "You are an evidence verdict worker. Use only provided evidence. "
+            "Return only strict JSON using exactly the requested keys."
+        ),
+        "prompt": (
+            "[Evidence]\n"
+            + json.dumps(
+                {
+                    "query": "NVIDIA Middle East AI infrastructure contract",
+                    "evidences": [
+                        {
+                            "evidence_id": "E1",
+                            "domain": "reuters.com",
+                            "source_tier": "tier1_media",
+                            "snippet": "NVIDIA announced a regional AI infrastructure partnership.",
+                        },
+                        {
+                            "evidence_id": "E2",
+                            "domain": "investor.nvidia.com",
+                            "source_tier": "company_ir",
+                            "snippet": "The company disclosed expanded regional infrastructure partnerships.",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n\n[Required JSON]\n"
+            + json.dumps(
+                {
+                    "status": "strong|usable|insufficient|contradictory",
+                    "ready_for_debate": True,
+                    "ready_for_signal": False,
+                    "verified_claims": [],
+                    "partially_supported_claims": [],
+                    "unsupported_claims": [],
+                    "contradictions": [],
+                    "best_sources": [],
+                    "missing_evidence": [],
+                    "recommended_next_searches": [],
+                    "allowed_use": "debate_and_signal|discussion_only|needs_refresh",
+                    "confidence": 0.0,
+                },
+                ensure_ascii=False,
+            )
+        ),
+        "expect_json": True,
+        "expect_keys": [
+            "status",
+            "ready_for_debate",
+            "ready_for_signal",
+            "verified_claims",
+            "missing_evidence",
+            "recommended_next_searches",
+            "confidence",
+        ],
+    },
 ]
 
 
@@ -88,21 +162,30 @@ async def _run_case(manager: LLMClientManager, case: dict[str, object]) -> dict[
             profile=str(case["profile"]),
         )
         latency = round(monotonic() - started, 3)
+        parsed_json = None
         is_json = False
+        missing_keys: list[str] = []
         if case.get("expect_json"):
-            try:
-                json.loads(response)
-                is_json = True
-            except Exception:
-                is_json = False
+            parsed_json = parse_json_object(response)
+            is_json = parsed_json is not None
+            expect_keys = [str(k) for k in case.get("expect_keys", [])] if isinstance(case.get("expect_keys", []), list) else []
+            if expect_keys and isinstance(parsed_json, dict):
+                missing_keys = [key for key in expect_keys if key not in parsed_json]
+            elif expect_keys:
+                missing_keys = expect_keys
+        ok = is_json if case.get("expect_json") else bool(str(response or "").strip())
+        if missing_keys:
+            ok = False
         return {
             "name": case["name"],
             "profile": case["profile"],
-            "ok": (is_json if case.get("expect_json") else bool(str(response or "").strip())),
+            "model": manager.local_model_for_profile(str(case["profile"])),
+            "ok": ok,
             "latency_sec": latency,
             "response_chars": len(str(response or "")),
             "preview": _safe_preview(response),
             "json_valid": is_json if case.get("expect_json") else None,
+            "missing_keys": missing_keys,
             "error": "",
         }
     except Exception as exc:
@@ -110,11 +193,13 @@ async def _run_case(manager: LLMClientManager, case: dict[str, object]) -> dict[
         return {
             "name": case["name"],
             "profile": case["profile"],
+            "model": manager.local_model_for_profile(str(case["profile"])),
             "ok": False,
             "latency_sec": latency,
             "response_chars": 0,
             "preview": "",
             "json_valid": False if case.get("expect_json") else None,
+            "missing_keys": [],
             "error": str(exc),
         }
 
@@ -133,6 +218,11 @@ async def main():
     print("=== local model healthcheck ===")
     print(f"backend={manager.local_backend}")
     print(f"model={manager.models['local']}")
+    if manager.local_backend == "openai_compatible":
+        print(f"base_url={manager.local_openai_base_url}")
+        print("endpoint=OpenAI-compatible chat.completions")
+    else:
+        print(f"ollama_url={manager.local_ollama_url}")
     print(f"repeat={repeat}")
     print(f"cases={', '.join(str(c['name']) for c in selected)}")
 
@@ -144,7 +234,7 @@ async def main():
             status = "OK" if result["ok"] else "FAIL"
             print(
                 f"[{status}] {result['name']} profile={result['profile']} "
-                f"latency={result['latency_sec']}s chars={result['response_chars']}"
+                f"model={result['model']} latency={result['latency_sec']}s chars={result['response_chars']}"
             )
             if result["error"]:
                 print(f"  error={result['error']}")

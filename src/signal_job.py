@@ -8,7 +8,7 @@ from db_manager import DBManager
 from llm_client import LLMClientManager
 from portfolio_manager import PortfolioManager
 from signal_engine import SignalEngine
-from web_search_agent import FactCheckAgent
+from stable_web_search_agent import FactCheckAgent
 
 
 async def main():

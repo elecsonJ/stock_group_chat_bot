@@ -106,6 +106,10 @@ LOCAL_API_KEY=lm-studio
 - `LOCAL_CONTEXT_BUDGET_RAG`
 - `LOCAL_CONTEXT_BUDGET_JUDGE`
 - `LOCAL_CONTEXT_BUDGET_EVIDENCE`
+- `LOCAL_CONTEXT_BUDGET_CLAIM_SEARCH`
+- `LOCAL_CONTEXT_BUDGET_EVIDENCE_VERDICT`
+
+로컬 모델은 이제 단순 요약뿐 아니라 `claim_search`와 `evidence_verdict` 역할도 맡습니다. `claim_search`는 하나의 투자 주장이나 뉴스 이벤트를 검증 가능한 사실 주장과 여러 검색어로 나누고, `evidence_verdict`는 수집된 근거 패키지를 보고 토론/신호에 넘겨도 되는지 보수적으로 판정합니다.
 
 긴 입력은 가운데를 잘라내는 방식으로 자동 축약됩니다.
 
@@ -127,6 +131,8 @@ LOCAL_CONTEXT_BUDGET_SUMMARY=10000
 LOCAL_CONTEXT_BUDGET_RAG=12000
 LOCAL_CONTEXT_BUDGET_JUDGE=14000
 LOCAL_CONTEXT_BUDGET_EVIDENCE=8000
+LOCAL_CONTEXT_BUDGET_CLAIM_SEARCH=6000
+LOCAL_CONTEXT_BUDGET_EVIDENCE_VERDICT=14000
 ```
 
 ### Ollama 유지 시
@@ -157,8 +163,54 @@ LOCAL_OLLAMA_URL=http://localhost:11434/api/chat
 - 로컬 모델이 JSON 출력 같은 좁은 작업에서 먼저 안정적인가
 - 대형 입력이 budget에 의해 잘 축약되고 있는가
 
+## LM Studio 연결 점검 순서
+현재 코드의 기본값은 하위 호환 때문에 `LOCAL_MODEL_BACKEND=ollama`입니다. LM Studio를 쓰려면 `.env`에 아래 값을 명시해야 합니다.
+
+```env
+LOCAL_MODEL_BACKEND=openai_compatible
+LOCAL_MODEL_NAME=gemma-3-27b-it
+LOCAL_OPENAI_BASE_URL=http://127.0.0.1:1234/v1
+LOCAL_API_KEY=lm-studio
+```
+
+점검 순서:
+
+1. LM Studio에서 모델을 Load합니다.
+2. Developer 또는 Local Server 메뉴에서 OpenAI-compatible server를 켭니다.
+3. 기본 포트가 `1234`인지 확인합니다.
+4. PowerShell에서 포트 확인:
+
+```powershell
+Test-NetConnection -ComputerName 127.0.0.1 -Port 1234
+```
+
+5. 프로젝트에서 healthcheck 실행:
+
+```powershell
+.\run_local_healthcheck.bat
+```
+
+정상이라면 healthcheck 출력에 `backend=openai_compatible`, `base_url=http://127.0.0.1:1234/v1`, `endpoint=OpenAI-compatible chat.completions`가 표시되고 각 profile 케이스가 `OK`로 나와야 합니다.
+
 ## 후속 제안
 1. 로컬 모델용 health check 명령 추가
 2. 모델별 latency/실패율 기록
 3. local profile별 실제 평균 입력 길이 로그
 4. Gemma 3 27B와 기존 gpt-oss:20b 비교 벤치 추가
+## 31B/e4b Routing Policy (2026-05-24)
+
+Stock debate is quality-sensitive: a small factual error can change the final decision. The recommended default is hybrid routing, not a single model for every local task.
+
+- Fast/default tasks: keep `LOCAL_MODEL_NAME=google/gemma-4-e4b` for high-volume extraction, JSON formatting, and quick claim-to-search work.
+- Quality-critical tasks: set `LOCAL_MODEL_NAME_EVIDENCE_VERDICT=google/gemma-4-31b` and `LOCAL_MODEL_NAME_JUDGE=google/gemma-4-31b`.
+- Long evidence summaries: set `LOCAL_MODEL_NAME_EVIDENCE=google/gemma-4-31b` when latency is acceptable.
+- Deep/nightly runs: if delay is acceptable, set `LOCAL_MODEL_NAME=google/gemma-4-31b` so most local work uses 31B.
+
+Operational rule: use e4b when freshness and throughput matter, use 31B when the output decides whether evidence is trustworthy enough for debate, signal scoring, or final judgment.
+
+```env
+LOCAL_MODEL_NAME=google/gemma-4-e4b
+LOCAL_MODEL_NAME_EVIDENCE_VERDICT=google/gemma-4-31b
+LOCAL_MODEL_NAME_JUDGE=google/gemma-4-31b
+LOCAL_MODEL_NAME_EVIDENCE=google/gemma-4-31b
+```

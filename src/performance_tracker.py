@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -89,6 +90,15 @@ class PerformanceTracker:
 
         evidence_count = int(verification.get("evidence_count", 0) or 0)
         payloads.append(("evidence_count_bucket", self._bucket_evidence_count(evidence_count), 1.0, {"evidence_count": evidence_count}))
+        payloads.append(("signal_score_bucket", self._bucket_score(float(signal_event.get("score_total", 0.0) or 0.0)), 1.0, {}))
+        payloads.append(("signal_confidence_bucket", self._bucket_confidence(float(signal_event.get("confidence", 0.0) or 0.0)), 1.0, {}))
+        payloads.append(("signal_status", str(signal_event.get("status", "") or "unknown"), 1.0, {}))
+        payloads.append(("portfolio_hit", str(bool(score_json.get("portfolio_hit", False))).lower(), 1.0, {}))
+
+        base_score = float(score_json.get("base_score", 0.0) or 0.0)
+        impact_score = float(score_json.get("impact_score", 0.0) or 0.0)
+        payloads.append(("signal_base_score_bucket", self._bucket_score(base_score), 1.0, {"base_score": base_score}))
+        payloads.append(("impact_score_bucket", self._bucket_impact_score(impact_score), 1.0, {"impact_score": impact_score}))
 
         for domain in list(dict.fromkeys(verification.get("domains", [])[:8])):
             payloads.append(("verification_domain", str(domain), 1.0, {}))
@@ -105,6 +115,29 @@ class PerformanceTracker:
             payloads.append(("exit_reason", exit_reason, 1.0, {}))
         if origin:
             payloads.append(("entry_origin", origin, 1.0, {}))
+
+        queue_item = self.db.get_debate_queue_item(event_id) if event_id else None
+        if queue_item:
+            if queue_item.get("reason"):
+                payloads.append(("debate_queue_reason", str(queue_item.get("reason")), 1.0, {}))
+            if queue_item.get("cost_gate_status"):
+                payloads.append(("debate_cost_gate_status", str(queue_item.get("cost_gate_status")), 1.0, {}))
+            payloads.append(("debate_priority_bucket", self._bucket_score(float(queue_item.get("priority", 0) or 0)), 1.0, {}))
+            trigger_json = queue_item.get("trigger_json", {}) or {}
+            hidden_candidates = trigger_json.get("hidden_candidates", []) or []
+            if hidden_candidates:
+                best_validation = max(float(c.get("validation_score", 0.0) or 0.0) for c in hidden_candidates)
+                best_path = max(float(c.get("path_score", 0.0) or 0.0) for c in hidden_candidates)
+                payloads.append(("hidden_candidate_validation_bucket", self._bucket_confidence(best_validation), 1.0, {"best_validation_score": best_validation}))
+                payloads.append(("hidden_candidate_path_bucket", self._bucket_confidence(best_path), 1.0, {"best_path_score": best_path}))
+
+        debate_quality = self.db.get_latest_debate_quality_for_event(event_id) if event_id else None
+        if debate_quality:
+            payloads.append(("debate_quality_status", str(debate_quality.get("status", "")), 1.0, {}))
+            payloads.append(("debate_quality_score_bucket", self._bucket_score(float(debate_quality.get("total_score", 0.0) or 0.0)), 1.0, {}))
+            detail = debate_quality.get("detail_json", {}) or {}
+            for missing in (detail.get("missing", []) or [])[:8]:
+                payloads.append(("debate_quality_missing", str(missing), 1.0, {}))
 
         saved = []
         for category, label, weight, extra in payloads:
@@ -259,6 +292,101 @@ class PerformanceTracker:
             )
         return sorted(out, key=lambda x: (x["avg_alpha_pct"], x["count"]), reverse=True)
 
+    def build_feedback_report(
+        self,
+        *,
+        horizon: str | None = "1d",
+        min_samples: int = 3,
+        limit: int = 2000,
+    ) -> dict[str, Any]:
+        categories = [
+            "signal_score_bucket",
+            "signal_confidence_bucket",
+            "evidence_count_bucket",
+            "verification_verdict",
+            "source_tier",
+            "impact_keyword",
+            "portfolio_hit",
+            "entry_origin",
+            "exit_reason",
+            "debate_queue_reason",
+            "debate_cost_gate_status",
+            "hidden_candidate_validation_bucket",
+            "debate_quality_status",
+            "debate_quality_missing",
+        ]
+        overall = self.summarize(horizon=horizon, limit=limit)
+        category_reports: dict[str, Any] = {}
+        promote: list[dict[str, Any]] = []
+        caution: list[dict[str, Any]] = []
+
+        for category in categories:
+            rows = self.summarize_attributions(category=category, horizon=horizon, limit=limit)
+            usable = [r for r in rows if int(r.get("count", 0) or 0) >= min_samples]
+            positive = [r for r in usable if float(r.get("avg_alpha_pct", 0.0) or 0.0) > 0]
+            negative = [r for r in usable if float(r.get("avg_alpha_pct", 0.0) or 0.0) < 0]
+            category_reports[category] = {
+                "top": positive[:5],
+                "bottom": sorted(negative, key=lambda x: (x["avg_alpha_pct"], -x["count"]))[:5],
+                "sample_count": sum(int(r.get("count", 0) or 0) for r in rows),
+                "qualified_label_count": len(usable),
+            }
+            for row in positive[:3]:
+                if float(row.get("avg_alpha_pct", 0.0) or 0.0) >= 0.5:
+                    promote.append({"category": category, **row})
+            for row in sorted(negative, key=lambda x: (x["avg_alpha_pct"], -x["count"]))[:3]:
+                if float(row.get("avg_alpha_pct", 0.0) or 0.0) <= -0.5:
+                    caution.append({"category": category, **row})
+
+        report = {
+            "schema_version": "performance_feedback.v1",
+            "generated_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+            "horizon": horizon,
+            "min_samples": int(min_samples),
+            "overall": overall,
+            "categories": category_reports,
+            "policy_hints": {
+                "promote": sorted(promote, key=lambda x: (x["avg_alpha_pct"], x["count"]), reverse=True)[:12],
+                "caution": sorted(caution, key=lambda x: (x["avg_alpha_pct"], -x["count"]))[:12],
+            },
+        }
+        return report
+
+    def save_feedback_profile(self, report: dict[str, Any]) -> None:
+        self.db.set_system_metadata(
+            "performance_feedback_profile_v1",
+            json.dumps(report, ensure_ascii=False),
+        )
+
+    def render_feedback_report(self, report: dict[str, Any]) -> str:
+        overall = report.get("overall", {}) or {}
+        lines = [
+            "🧭 **[성과 기반 피드백]**",
+            f"- horizon: {report.get('horizon') or '-'} | min_samples={report.get('min_samples')}",
+            f"- count: {overall.get('count', 0)} | win_rate={overall.get('win_rate', 0.0) * 100:.1f}% | "
+            f"avg_alpha={overall.get('avg_alpha_pct', 0.0):+.2f}% | expectancy={overall.get('expectancy_pct', 0.0):+.2f}%",
+        ]
+        hints = report.get("policy_hints", {}) or {}
+        promote = hints.get("promote", []) or []
+        caution = hints.get("caution", []) or []
+        if promote:
+            lines.append("\n강화 후보:")
+            for row in promote[:6]:
+                lines.append(
+                    f"- {row.get('category')}={row.get('label')} | n={row.get('count')} "
+                    f"alpha={row.get('avg_alpha_pct', 0.0):+.2f}% win={row.get('win_rate', 0.0) * 100:.1f}%"
+                )
+        if caution:
+            lines.append("\n주의 후보:")
+            for row in caution[:6]:
+                lines.append(
+                    f"- {row.get('category')}={row.get('label')} | n={row.get('count')} "
+                    f"alpha={row.get('avg_alpha_pct', 0.0):+.2f}% win={row.get('win_rate', 0.0) * 100:.1f}%"
+                )
+        if not promote and not caution:
+            lines.append("\n아직 표본이 부족합니다. replay 측정치를 더 쌓은 뒤 정책 힌트를 생성할 수 있습니다.")
+        return "\n".join(lines)
+
     def save_run_summary(
         self,
         *,
@@ -335,6 +463,39 @@ class PerformanceTracker:
             return "3-5"
         if evidence_count >= 1:
             return "1-2"
+        return "0"
+
+    def _bucket_score(self, score: float) -> str:
+        if score >= 85:
+            return "85+"
+        if score >= 75:
+            return "75-84"
+        if score >= 65:
+            return "65-74"
+        if score >= 55:
+            return "55-64"
+        if score > 0:
+            return "1-54"
+        return "0"
+
+    def _bucket_confidence(self, value: float) -> str:
+        if value >= 0.85:
+            return "0.85+"
+        if value >= 0.65:
+            return "0.65-0.84"
+        if value >= 0.45:
+            return "0.45-0.64"
+        if value > 0:
+            return "0.01-0.44"
+        return "0"
+
+    def _bucket_impact_score(self, score: float) -> str:
+        if score >= 20:
+            return "20+"
+        if score >= 10:
+            return "10-19"
+        if score > 0:
+            return "1-9"
         return "0"
 
     def _dedupe_latest(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

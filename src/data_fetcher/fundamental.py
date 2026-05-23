@@ -1,17 +1,20 @@
-import yfinance as yf
-import pandas_ta as ta
-import pandas as pd
+try:
+    import yfinance as yf
+except Exception:  # pragma: no cover
+    yf = None
 import asyncio
 from datetime import datetime, timedelta
 from data_fetcher.dart_official import DARTOfficialFetcher
 from data_fetcher.krx_kind_official import KRXKindOfficialChecker
 from data_fetcher.sec_official import SECOfficialFetcher
+from yfinance_runtime import configure_yfinance_cache
 
 class AdvancedDataFetcher:
     def __init__(self):
         self.dart_fetcher = DARTOfficialFetcher()
         self.krx_kind_checker = KRXKindOfficialChecker()
         self.sec_fetcher = SECOfficialFetcher()
+        configure_yfinance_cache(yf)
 
     async def get_comprehensive_stock_data(self, ticker: str) -> str:
         """
@@ -22,6 +25,8 @@ class AdvancedDataFetcher:
         official_text = await self._get_official_company_text(ticker)
 
         def fetch_sync(t_name):
+            if yf is None:
+                return f"[{t_name}] yfinance is not installed; market/technical reference data is unavailable.\n"
             try:
                 stock = yf.Ticker(t_name)
                 info = stock.info
@@ -93,23 +98,16 @@ class AdvancedDataFetcher:
                 hist = stock.history(period="6mo")
                 tech_text = "- **기술적 차트 지표 (6개월 기준)**: 데이터를 불러올 수 없습니다.\n"
                 if not hist.empty and len(hist) > 50:
-                    # pandas_ta를 활용하여 지표 계산
-                    hist.ta.sma(length=20, append=True)
-                    hist.ta.sma(length=50, append=True)
-                    hist.ta.sma(length=200, append=True)
-                    hist.ta.rsi(length=14, append=True)
-                    hist.ta.macd(fast=12, slow=26, signal=9, append=True)
-                    hist.ta.bbands(length=20, std=2, append=True)
-                    
+                    indicators = self._technical_indicators(hist)
                     last_row = hist.iloc[-1]
-                    sma20 = last_row.get('SMA_20', 'N/A')
-                    sma50 = last_row.get('SMA_50', 'N/A')
-                    sma200 = last_row.get('SMA_200', 'N/A')
-                    rsi14 = last_row.get('RSI_14', 'N/A')
-                    macd = last_row.get('MACD_12_26_9', 'N/A')
-                    macd_signal = last_row.get('MACDs_12_26_9', 'N/A')
-                    bb_low = last_row.get('BBL_20_2.0', 'N/A')
-                    bb_high = last_row.get('BBU_20_2.0', 'N/A')
+                    sma20 = indicators.get('sma20', 'N/A')
+                    sma50 = indicators.get('sma50', 'N/A')
+                    sma200 = indicators.get('sma200', 'N/A')
+                    rsi14 = indicators.get('rsi14', 'N/A')
+                    macd = indicators.get('macd', 'N/A')
+                    macd_signal = indicators.get('macd_signal', 'N/A')
+                    bb_low = indicators.get('bb_low', 'N/A')
+                    bb_high = indicators.get('bb_high', 'N/A')
                     current_close = last_row.get('Close', current_price)
                     
                     # 52주 데이터
@@ -217,3 +215,36 @@ class AdvancedDataFetcher:
         elif val >= 1_000_000:
             return f"{val/1_000_000:.2f}M {currency}"
         return f"{val} {currency}"
+
+    def _technical_indicators(self, hist):
+        closes = hist["Close"].dropna()
+        if closes.empty:
+            return {}
+        result = {}
+        for length, key in [(20, "sma20"), (50, "sma50"), (200, "sma200")]:
+            if len(closes) >= length:
+                result[key] = float(closes.rolling(length).mean().iloc[-1])
+
+        if len(closes) >= 15:
+            delta = closes.diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            avg_loss = float(loss.iloc[-1] or 0.0)
+            if avg_loss > 0:
+                rs = float(gain.iloc[-1] or 0.0) / avg_loss
+                result["rsi14"] = 100.0 - (100.0 / (1.0 + rs))
+
+        if len(closes) >= 35:
+            ema12 = closes.ewm(span=12, adjust=False).mean()
+            ema26 = closes.ewm(span=26, adjust=False).mean()
+            macd_line = ema12 - ema26
+            signal = macd_line.ewm(span=9, adjust=False).mean()
+            result["macd"] = float(macd_line.iloc[-1])
+            result["macd_signal"] = float(signal.iloc[-1])
+
+        if len(closes) >= 20:
+            mid = closes.rolling(20).mean()
+            std = closes.rolling(20).std()
+            result["bb_low"] = float((mid - 2 * std).iloc[-1])
+            result["bb_high"] = float((mid + 2 * std).iloc[-1])
+        return result

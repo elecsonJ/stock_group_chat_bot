@@ -8,6 +8,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'investment_bot.
 class DBManager:
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path or DB_PATH
+        self._closed = False
         # data 폴더가 없으면 생성
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         # timeout=20.0 및 check_same_thread=False 추가 (DB Lock 및 동시성 에러 방지)
@@ -420,6 +421,37 @@ class DBManager:
             )
             '''
         )
+        self.cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS event_intake_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT,
+                event_key TEXT,
+                audit_stage TEXT,
+                route TEXT,
+                reason TEXT,
+                score_total REAL,
+                quality_json TEXT,
+                decision_json TEXT,
+                created_at TEXT
+            )
+            '''
+        )
+        self.cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS context_selection_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                context_id TEXT,
+                query TEXT,
+                consumer TEXT,
+                selected_json TEXT,
+                excluded_json TEXT,
+                quality_json TEXT,
+                budget_json TEXT,
+                created_at TEXT
+            )
+            '''
+        )
 
         self._ensure_column("research_evidences", "query_norm", "TEXT")
         self._ensure_column("research_evidences", "created_at", "TEXT")
@@ -460,6 +492,8 @@ class DBManager:
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_debate_quality_event ON debate_quality_scores(event_id, total_score)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_review_triggers_status_priority ON investment_review_triggers(status, priority, created_at)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_review_triggers_event_type ON investment_review_triggers(event_id, ticker, trigger_type, status)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_event_intake_event_stage ON event_intake_audits(event_id, audit_stage, created_at)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_audit_context ON context_selection_audits(context_id, consumer, created_at)')
         self._upsert_default_guardrail_state()
         self._upsert_default_paper_account_state()
         self.conn.commit()
@@ -485,6 +519,12 @@ class DBManager:
             (key, value, now_iso),
         )
         self.conn.commit()
+
+    def get_system_metadata(self, key: str) -> str | None:
+        return self._get_metadata(key)
+
+    def set_system_metadata(self, key: str, value: str):
+        self._set_metadata(key, value)
 
     def _ensure_column(self, table_name: str, column_name: str, col_type: str):
         self.cursor.execute(f"PRAGMA table_info({table_name})")
@@ -1881,6 +1921,120 @@ class DBManager:
             )
         return out
 
+    def save_event_intake_audit(self, row: dict):
+        now_iso = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        self.cursor.execute(
+            '''
+            INSERT INTO event_intake_audits (
+                event_id, event_key, audit_stage, route, reason, score_total,
+                quality_json, decision_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                row.get("event_id"),
+                row.get("event_key"),
+                row.get("audit_stage", "signal_intake"),
+                row.get("route", ""),
+                row.get("reason", ""),
+                float(row.get("score_total", 0.0) or 0.0),
+                json.dumps(row.get("quality_json", {}) or {}, ensure_ascii=False),
+                json.dumps(row.get("decision_json", {}) or {}, ensure_ascii=False),
+                row.get("created_at") or now_iso,
+            ),
+        )
+        self.conn.commit()
+
+    def list_event_intake_audits(
+        self,
+        event_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        params: list[object] = []
+        sql = (
+            "SELECT event_id, event_key, audit_stage, route, reason, score_total, "
+            "quality_json, decision_json, created_at FROM event_intake_audits"
+        )
+        if event_id:
+            sql += " WHERE event_id = ?"
+            params.append(event_id)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        self.cursor.execute(sql, params)
+        out = []
+        for row in self.cursor.fetchall():
+            out.append(
+                {
+                    "event_id": row[0] or "",
+                    "event_key": row[1] or "",
+                    "audit_stage": row[2] or "",
+                    "route": row[3] or "",
+                    "reason": row[4] or "",
+                    "score_total": float(row[5] or 0.0),
+                    "quality_json": json.loads(row[6]) if row[6] else {},
+                    "decision_json": json.loads(row[7]) if row[7] else {},
+                    "created_at": row[8],
+                }
+            )
+        return out
+
+    def save_context_selection_audit(self, row: dict):
+        now_iso = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        self.cursor.execute(
+            '''
+            INSERT INTO context_selection_audits (
+                context_id, query, consumer, selected_json, excluded_json,
+                quality_json, budget_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                row.get("context_id"),
+                row.get("query", ""),
+                row.get("consumer", ""),
+                json.dumps(row.get("selected_json", {}) or {}, ensure_ascii=False),
+                json.dumps(row.get("excluded_json", {}) or {}, ensure_ascii=False),
+                json.dumps(row.get("quality_json", {}) or {}, ensure_ascii=False),
+                json.dumps(row.get("budget_json", {}) or {}, ensure_ascii=False),
+                row.get("created_at") or now_iso,
+            ),
+        )
+        self.conn.commit()
+
+    def list_context_selection_audits(
+        self,
+        context_id: str | None = None,
+        consumer: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        params: list[object] = []
+        sql = (
+            "SELECT context_id, query, consumer, selected_json, excluded_json, "
+            "quality_json, budget_json, created_at FROM context_selection_audits WHERE 1=1"
+        )
+        if context_id:
+            sql += " AND context_id = ?"
+            params.append(context_id)
+        if consumer:
+            sql += " AND consumer = ?"
+            params.append(consumer)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        self.cursor.execute(sql, params)
+        out = []
+        for row in self.cursor.fetchall():
+            out.append(
+                {
+                    "context_id": row[0] or "",
+                    "query": row[1] or "",
+                    "consumer": row[2] or "",
+                    "selected_json": json.loads(row[3]) if row[3] else {},
+                    "excluded_json": json.loads(row[4]) if row[4] else {},
+                    "quality_json": json.loads(row[5]) if row[5] else {},
+                    "budget_json": json.loads(row[6]) if row[6] else {},
+                    "created_at": row[7],
+                }
+            )
+        return out
+
     def set_kill_switch(self, enabled: bool):
         now_iso = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         self.cursor.execute(
@@ -2267,6 +2421,29 @@ class DBManager:
             WHERE debate_id = ?
             ''',
             (int(debate_id),),
+        )
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "debate_id": int(row[0]),
+            "event_id": row[1] or "",
+            "total_score": float(row[2] or 0.0),
+            "status": row[3] or "",
+            "scored_at": row[4],
+            "detail_json": json.loads(row[5]) if row[5] else {},
+        }
+
+    def get_latest_debate_quality_for_event(self, event_id: str) -> dict | None:
+        self.cursor.execute(
+            '''
+            SELECT debate_id, event_id, total_score, status, scored_at, detail_json
+            FROM debate_quality_scores
+            WHERE event_id = ?
+            ORDER BY scored_at DESC, debate_id DESC
+            LIMIT 1
+            ''',
+            (str(event_id or "").strip(),),
         )
         row = self.cursor.fetchone()
         if not row:
@@ -2993,7 +3170,37 @@ class DBManager:
         )
         self.conn.commit()
 
+    def close(self):
+        if self._closed:
+            return
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
+        try:
+            self.cursor.close()
+        except Exception:
+            pass
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 # 테스트용 실행
 if __name__ == "__main__":
-    db = DBManager()
-    print("DB 및 테이블 생성 완료!")
+    with DBManager():
+        print("DB 및 테이블 생성 완료!")

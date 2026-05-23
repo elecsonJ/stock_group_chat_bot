@@ -140,6 +140,13 @@ class DebateController:
             context_brief = self.news_context.render_for_model(context_pack)
             quality = context_pack.get("quality", {}) if isinstance(context_pack, dict) else {}
             if context_brief:
+                self.news_context.audit_rendered_contexts(
+                    pack=context_pack,
+                    consumer="debate_manager",
+                    rendered_contexts=[context_brief],
+                    limit=8,
+                    truncated_chars=None,
+                )
                 history += f"**[독립 뉴스 Context Pack]**\n{context_brief}\n\n"
                 await ctx.send(
                     f"✅ 뉴스팩 생성 완료: state={quality.get('state')} score={quality.get('score')} | "

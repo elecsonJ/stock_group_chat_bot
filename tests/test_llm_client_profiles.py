@@ -76,6 +76,16 @@ class LLMClientProfileTests(unittest.TestCase):
         self.assertIn("반드시 한국어", system_prompt)
         self.assertLessEqual(len(user_prompt), 120)
 
+    def test_local_model_for_profile_uses_env_override(self):
+        os.environ["LOCAL_MODEL_NAME_EVIDENCE_VERDICT"] = "google/gemma-4-31b"
+        try:
+            manager = LLMClientManager()
+
+            self.assertEqual(manager.local_model_for_profile("evidence_verdict"), "google/gemma-4-31b")
+            self.assertEqual(manager.local_model_for_profile("claim_search"), manager.models["local"])
+        finally:
+            os.environ.pop("LOCAL_MODEL_NAME_EVIDENCE_VERDICT", None)
+
 
 if __name__ == "__main__":
     unittest.main()

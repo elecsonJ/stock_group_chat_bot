@@ -107,6 +107,88 @@
   - `DEBATE_JOB_MAX_ITEMS`
   - `MARKET_DATA_PROVIDER`
 
+### 8. DB connection lifecycle 하드닝 (2026-05-23)
+- 수정 파일:
+  - `src/db_manager.py`
+  - `src/ontology/store.py`
+  - `src/signal_engine.py`
+- 목적:
+  - Windows 환경에서 테스트용 SQLite 파일이 열린 채로 남아 임시 디렉터리 정리가 실패하는 문제를 제거
+  - 문서상 남은 과제였던 DB 계층 안정화의 첫 단계로, connection 생명주기를 명시적으로 관리
+- 변경 내용:
+  - `DBManager`와 `OntologyStore`에 `close()`, context manager, 안전한 destructor 추가
+  - `SignalEngine`이 내부에서 만든 `OntologyStore`를 함께 닫도록 `close()` 추가
+  - 외부에서 주입한 DB는 `SignalEngine`이 임의로 닫지 않도록 ownership을 구분
+- 효과:
+  - 온톨로지/시그널 테스트의 Windows 파일 잠금 실패 해소
+  - 장기 실행 프로세스와 배치 작업에서 connection 정리 경로가 명확해짐
+
+### 9. 성과 기반 피드백 루프와 데이터 품질 평가 (2026-05-23)
+- 신규 파일:
+  - `src/data_quality.py`
+  - `src/data_quality_job.py`
+  - `run_data_quality.bat`
+- 수정 파일:
+  - `src/performance_tracker.py`
+  - `src/replay_job.py`
+  - `src/main.py`
+  - `src/db_manager.py`
+  - `scripts/windows/run_task.ps1`
+- 목적:
+  - replay/performance 결과를 단순 성과표가 아니라 다음 운영 정책의 피드백 재료로 사용
+  - 시스템이 모은 데이터가 판단 가능한 수준인지 수집 신선도, 커버리지, 출처 품질, 검증 커버리지, 관리 상태, 성과 측정 커버리지로 점검
+- 변경 내용:
+  - `PerformanceTracker.record_attributions()`가 signal score bucket, confidence bucket, portfolio hit, source tier, debate quality, hidden candidate bucket 등을 성과 attribution으로 저장
+  - `build_feedback_report()` / `render_feedback_report()` / `save_feedback_profile()` 추가
+  - `run_replay.bat` 실행 시 최신 성과 피드백 프로필을 `system_metadata.performance_feedback_profile_v1`에 저장
+  - Discord 명령 `!성과피드백`, `!데이터품질` 추가
+  - `DataQualityEvaluator`가 최근 데이터 상태를 `data_quality.v1` 리포트로 평가하고 `system_metadata.data_quality_report_v1`에 저장
+- 효과:
+  - 어떤 조건의 시그널/검증/출처/토론 품질이 실제 alpha와 연결되는지 누적 추적 가능
+  - 운영자가 수집 파이프라인 공백, 공식소스 부족, 검증 부족, replay 미실행을 빠르게 확인 가능
+
+### 10. Event/Context 감사 추적과 LM Studio 점검 보강 (2026-05-23)
+- 수정 파일:
+  - `src/db_manager.py`
+  - `src/signal_engine.py`
+  - `src/news_context_pack.py`
+  - `src/rag_agent.py`
+  - `src/debate_manager.py`
+  - `src/main.py`
+  - `src/local_model_healthcheck.py`
+- 신규 테스트:
+  - `tests/test_audit_trails.py`
+- 목적:
+  - 데이터 한 건이 들어왔을 때 왜 무시/모니터/토론/승인 경로로 갔는지 복기 가능하게 함
+  - AI에게 어떤 컨텍스트가 왜 전달됐는지 남겨, 모델 실패와 입력 컨텍스트 실패를 구분 가능하게 함
+  - LM Studio OpenAI-compatible 연결 설정을 healthcheck 출력에서 명확히 확인
+- 변경 내용:
+  - `event_intake_audits` 테이블과 저장/조회 메서드 추가
+  - `context_selection_audits` 테이블과 저장/조회 메서드 추가
+  - `SignalEngine`이 stale, threshold 미달, monitor, debate, approval 경로를 audit으로 저장
+  - `NewsContextPackService`, `RAGAgent`, `DebateController`가 컨텍스트 선택/렌더링 정보를 audit으로 저장
+  - Discord 명령 `!이벤트감사`, `!컨텍스트감사` 추가
+  - local healthcheck에 `base_url`/endpoint 정보를 출력
+- 효과:
+  - “왜 이 이벤트가 이렇게 처리됐는가”와 “AI가 무엇을 보고 답했는가”를 운영 중 추적 가능
+  - LM Studio 연결 문제를 Ollama 기본값 혼동 없이 확인 가능
+
+### 11. 로컬 LLM 기반 팩트체크 안정화 (2026-05-23)
+
+- 추가/변경 파일
+  - `src/stable_web_search_agent.py`
+  - `src/main.py`
+  - `src/signal_job.py`
+  - `src/debate_job.py`
+  - `src/signal_engine.py`
+  - `src/local_model_healthcheck.py`
+- 내용
+  - 로컬 LLM을 claim-to-search planner로 사용하여 단일 검색어가 아니라 여러 검증 검색어를 설계
+  - 웹 검색 결과를 dedupe/rank하고 어떤 검색어에서 나온 근거인지 `matched_query`로 보존
+  - 로컬 LLM을 evidence verdict worker로 사용하여 `ready_for_signal`, `missing_evidence`, `unsupported_claims`, `recommended_next_searches`를 산출
+  - 신호 엔진은 로컬 판정이 충분하지 않으면 점수 보너스를 주지 않고 `insufficient`로 보수 처리
+  - local healthcheck에 `claim_to_search`, `evidence_verdict` 케이스 추가
+
 ## 문서 정리 내용
 다음 문서를 현재 구현 기준으로 수정했습니다.
 
@@ -183,3 +265,47 @@ python3 -m unittest discover -s tests
 Ran 27 tests
 OK
 ```
+
+2026-05-23 DB connection lifecycle 보완 후 검증:
+
+```bash
+python -m pytest -q
+```
+
+```text
+37 passed, 2 skipped
+```
+
+2026-05-23 성과 피드백/데이터 품질 평가 추가 후 검증:
+
+```bash
+python -m pytest -q
+python src\data_quality_job.py --lookback-hours 168
+```
+
+```text
+39 passed, 2 skipped
+```
+
+2026-05-23 감사 추적 추가 후 검증:
+
+```bash
+python -m pytest -q
+```
+
+```text
+41 passed, 2 skipped
+```
+## 2026-05-24 Update: Local Model Routing And Market Data Assessment
+
+- Added per-profile local model routing in `LLMClientManager.local_model_for_profile`.
+- Operators can keep `LOCAL_MODEL_NAME` on a fast model and override quality-critical profiles with 31B:
+  - `LOCAL_MODEL_NAME_EVIDENCE_VERDICT`
+  - `LOCAL_MODEL_NAME_JUDGE`
+  - `LOCAL_MODEL_NAME_EVIDENCE`
+  - `LOCAL_MODEL_NAME_CLAIM_SEARCH`
+- `local_model_healthcheck.py` now prints the effective model for each profile and validates required JSON keys for local research worker profiles.
+- Current market data path is yfinance/Yahoo Finance reference data through `MarketDataProvider`, `TradingExecutor`, portfolio PnL, and replay. It is adequate for paper/replay/reference checks, but not yet a live execution-grade feed.
+- Added `src/yfinance_runtime.py` so yfinance timezone cache is kept under `YFINANCE_CACHE_DIR` inside the project workspace.
+- Removed `pandas_ta` from core requirements and replaced the advanced fundamental fetcher's technical indicators with local pandas-based calculations to avoid install-time blockage.
+- Next market-data hardening target: persist event-window price/volume/benchmark reaction snapshots so news decisions can distinguish fresh information from already-priced-in moves.

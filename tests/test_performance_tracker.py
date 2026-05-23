@@ -19,7 +19,7 @@ class PerformanceTrackerTests(unittest.TestCase):
         self.tracker = PerformanceTracker(self.db)
 
     def tearDown(self):
-        self.db.conn.close()
+        self.db.close()
         self.tmpdir.cleanup()
 
     def test_equity_curve_and_run_summary(self):
@@ -52,6 +52,73 @@ class PerformanceTrackerTests(unittest.TestCase):
         self.assertEqual(summary["measurement_count"], 3)
         saved = self.db.list_performance_run_summaries(run_name="perf_unit")
         self.assertEqual(len(saved), 1)
+
+    def test_feedback_report_uses_signal_and_debate_attributions(self):
+        event_id = "SG-FEEDBACK-1"
+        self.db.upsert_signal_event(
+            {
+                "event_id": event_id,
+                "event_key": "EVT-FEEDBACK-1",
+                "date": "2026-04-05",
+                "detected_at": "2026-04-05T09:00:00",
+                "title": "NVIDIA verified guidance raise",
+                "summary": "NVIDIA guidance raise verified by SEC and Reuters",
+                "score_total": 88.0,
+                "score_json": {
+                    "base_score": 62.0,
+                    "impact_score": 18.0,
+                    "portfolio_hit": True,
+                    "impact_keywords": ["guidance"],
+                },
+                "related_tickers": ["NVDA"],
+                "direction": "bullish",
+                "urgency": "same_day",
+                "confidence": 0.91,
+                "status": "monitor_only",
+                "evidence_ids": ["EV1", "EV2"],
+                "verification_json": {
+                    "verdict": "verified",
+                    "evidence_count": 2,
+                    "domains": ["sec.gov", "reuters.com"],
+                    "source_tiers": ["regulatory", "tier1_media"],
+                },
+                "last_verified_at": "2026-04-05T09:01:00",
+            }
+        )
+        self.db.save_debate_quality_score(
+            {
+                "debate_id": 42,
+                "event_id": event_id,
+                "total_score": 85.0,
+                "status": "strong",
+                "detail_json": {"missing": []},
+            }
+        )
+        measurement = self.tracker.record_measurement(
+            event_id=event_id,
+            ticker="NVDA",
+            horizon="1d",
+            entry_price=100.0,
+            exit_price=104.0,
+            benchmark_entry_price=100.0,
+            benchmark_exit_price=101.0,
+            detail_json={"measured_at": "2026-04-06T09:00:00", "origin": "signal"},
+        )
+
+        attrs = self.tracker.record_attributions(
+            signal_event=self.db.get_signal_event(event_id),
+            measurement=measurement,
+        )
+        categories = {a["category"] for a in attrs}
+        self.assertIn("signal_score_bucket", categories)
+        self.assertIn("source_tier", categories)
+        self.assertIn("debate_quality_status", categories)
+
+        report = self.tracker.build_feedback_report(horizon="1d", min_samples=1)
+        self.assertEqual(report["schema_version"], "performance_feedback.v1")
+        self.assertTrue(report["policy_hints"]["promote"])
+        self.tracker.save_feedback_profile(report)
+        self.assertIsNotNone(self.db.get_system_metadata("performance_feedback_profile_v1"))
 
 
 if __name__ == "__main__":

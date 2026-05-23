@@ -13,11 +13,11 @@ load_dotenv()
 class LLMClientManager:
     def __init__(self):
         # OpenAI (GPT)
-        self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY") or "missing-openai-key")
         # Anthropic (Claude)
-        self.anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        self.anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY") or "missing-anthropic-key")
         # Google (Gemini) - 최신 SDK 유지 (google.genai)
-        self.gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY") or "missing-gemini-key")
         
         self.models = {
             "gpt": "gpt-5.2-2025-12-11", # 사용자가 제시한 작동 가능한 대화형 모델
@@ -40,6 +40,8 @@ class LLMClientManager:
             "rag_answer": max(4000, int(os.getenv("LOCAL_CONTEXT_BUDGET_RAG", "16000"))),
             "judge": max(4000, int(os.getenv("LOCAL_CONTEXT_BUDGET_JUDGE", "18000"))),
             "evidence": max(2000, int(os.getenv("LOCAL_CONTEXT_BUDGET_EVIDENCE", "10000"))),
+            "claim_search": max(1200, int(os.getenv("LOCAL_CONTEXT_BUDGET_CLAIM_SEARCH", "6000"))),
+            "evidence_verdict": max(2000, int(os.getenv("LOCAL_CONTEXT_BUDGET_EVIDENCE_VERDICT", "14000"))),
         }
         self.gemini_primary_retries = max(1, int(os.getenv("GEMINI_PRIMARY_RETRIES", "2")))
         self.gemini_fallback_retries = max(1, int(os.getenv("GEMINI_FALLBACK_RETRIES", "2")))
@@ -56,6 +58,11 @@ class LLMClientManager:
             api_key=self.local_api_key,
             base_url=self.local_openai_base_url,
         )
+
+    def local_model_for_profile(self, profile: str = "default") -> str:
+        safe_profile = re.sub(r"[^A-Z0-9]+", "_", str(profile or "default").upper()).strip("_")
+        profile_model = os.getenv(f"LOCAL_MODEL_NAME_{safe_profile}", "").strip()
+        return profile_model or self.models["local"]
 
     def _is_circuit_open(self, key: str) -> tuple[bool, int]:
         state = self._circuit_state.get(key, {"open_until": 0.0})
@@ -238,7 +245,7 @@ class LLMClientManager:
         try:
             if self.local_backend == "openai_compatible":
                 response = await self.local_openai_client.chat.completions.create(
-                    model=self.models["local"],
+                    model=self.local_model_for_profile(profile),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -256,7 +263,7 @@ class LLMClientManager:
                 local_url = local_url.replace("api/generate", "api/chat")
             async with httpx.AsyncClient(timeout=float(self.local_timeout_sec)) as client:
                 payload = {
-                    "model": self.models["local"],
+                    "model": self.local_model_for_profile(profile),
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}

@@ -10,6 +10,8 @@ try:
 except Exception:  # pragma: no cover
     yf = None
 
+from yfinance_runtime import configure_yfinance_cache
+
 
 @dataclass
 class PriceQuote:
@@ -33,6 +35,7 @@ class MarketDataProvider:
     def __init__(self):
         self.provider = os.getenv("MARKET_DATA_PROVIDER", "yfinance").strip().lower()
         self._history_cache: dict[tuple[str, str, str, str], Any] = {}
+        configure_yfinance_cache(yf)
 
     def get_latest_quote(self, ticker: str) -> PriceQuote | None:
         if self.provider != "yfinance":

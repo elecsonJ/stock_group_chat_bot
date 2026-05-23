@@ -119,7 +119,7 @@ class DebateQueueRunner:
         from crawler import InvestmentCrawler
         from debate_manager import DebateController
         from llm_client import LLMClientManager
-        from web_search_agent import FactCheckAgent
+        from stable_web_search_agent import FactCheckAgent
 
         llm = LLMClientManager()
         checker = FactCheckAgent(llm)

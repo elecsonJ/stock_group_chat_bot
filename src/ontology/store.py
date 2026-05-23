@@ -26,6 +26,7 @@ class OntologyStore:
 
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path or DB_PATH
+        self._closed = False
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.conn = sqlite3.connect(self.db_path, timeout=20.0, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -551,3 +552,33 @@ class OntologyStore:
             (dataset_name, source_path, int(records_count), _now_utc()),
         )
         self.conn.commit()
+
+    def close(self):
+        if self._closed:
+            return
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
+        try:
+            self.cursor.close()
+        except Exception:
+            pass
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

@@ -99,7 +99,15 @@ class RAGAgent:
             evidence_limit=4,
             lookback_hours=120,
         )
-        for ctx in self.news_context.render_rag_contexts(context_pack):
+        pack_contexts = self.news_context.render_rag_contexts(context_pack)
+        self.news_context.audit_rendered_contexts(
+            pack=context_pack,
+            consumer="rag_agent",
+            rendered_contexts=pack_contexts,
+            limit=5,
+            truncated_chars=800,
+        )
+        for ctx in pack_contexts:
             if ctx not in retrieved_contexts:
                 retrieved_contexts.append(ctx)
 

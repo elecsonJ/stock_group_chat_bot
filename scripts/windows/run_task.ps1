@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("bot", "news", "news_backfill", "news_context", "signals", "debates", "replay", "daily", "weekly", "monthly", "healthcheck", "maintenance")]
+    [ValidateSet("bot", "news", "news_backfill", "news_context", "signals", "debates", "replay", "data_quality", "daily", "weekly", "monthly", "healthcheck", "maintenance")]
     [string]$Job,
     [string]$Root = ""
 )
@@ -36,6 +36,7 @@ $JobArgs = @{
     "signals"       = @("src\signal_job.py")
     "debates"       = @("src\debate_job.py")
     "replay"        = @("src\replay_job.py")
+    "data_quality"  = @("src\data_quality_job.py")
     "daily"         = @("src\summarizer.py", "daily")
     "weekly"        = @("src\summarizer.py", "weekly")
     "monthly"       = @("src\summarizer.py", "monthly")

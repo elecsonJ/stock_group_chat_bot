@@ -1,3 +1,9 @@
+## Status Update (2026-05-24)
+
+- Local LLM routing now supports profile-specific model overrides. Recommended operation is e4b for fast helper tasks and 31B for `evidence_verdict`, `judge`, and high-stakes evidence summaries.
+- Market data is connected through yfinance reference quotes and historical closes, but it is not yet a full investment-grade market reaction layer.
+- Remaining priority: create event-window market snapshots around each news event, including pre/post price move, volume spike, benchmark/sector-relative move, and whether the move preceded public news collection.
+
 # Master System Roadmap And Status (2026-04-05)
 
 ## 이 문서의 목적
@@ -137,6 +143,7 @@
 현재 상태:
 - `상당 부분 완료`
 - out-of-sample split, equity curve, MDD, attribution은 구현됨
+- 성과 기반 피드백 리포트(`performance_feedback.v1`)가 추가되어 source tier, signal score, debate quality, hidden candidate bucket별 alpha 추적이 가능해짐
 - 아직 체결 현실성 고도화와 path attribution 심화는 남음
 
 ### Phase F. Production Research Quality
@@ -269,7 +276,7 @@
 3. `정식 exit rule / take-profit / trailing discipline`
 4. `regime-aware filtering`
 5. `evidence-specific FTS/ranking`
-6. `News Context Pack 품질 점수와 실제 replay 성과의 상관관계 추적`
+6. `News Context Pack 품질 점수와 실제 replay 성과의 상관관계 추적` (기초 피드백 루프는 구현됨, 표본 축적 필요)
 
 ### 다음 우선순위
 1. `섹터/테마 상관관계 제한`

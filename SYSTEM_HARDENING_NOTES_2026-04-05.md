@@ -64,6 +64,20 @@
   - 테스트에서 별도 DB 파일 사용 가능
   - 시작 시 불필요한 전체 FTS 재색인 비용 감소
 
+### 2-1. DB connection lifecycle 하드닝 (2026-05-23)
+- 수정 파일:
+  - `src/db_manager.py`
+  - `src/ontology/store.py`
+  - `src/signal_engine.py`
+- 변경점:
+  - `DBManager`와 `OntologyStore`에 명시적 `close()`와 context manager를 추가
+  - 객체 해제 시 남은 SQLite connection을 안전하게 닫는 fallback을 추가
+  - `SignalEngine`이 내부 온톨로지 저장소 connection을 정리하도록 보강
+  - 외부에서 주입된 DB connection은 호출자가 소유하도록 ownership을 분리
+- 효과:
+  - Windows에서 임시 SQLite 파일 삭제가 실패하던 테스트 불안정성 제거
+  - 배치/테스트/장기 실행 프로세스에서 connection 정리 경로가 명확해짐
+
 ### 3. 토론 입력 정제
 - 수정 파일: `src/debate_manager.py`
 - 변경점:
@@ -165,7 +179,7 @@ python3 -m unittest discover -s tests
 - 실행은 fail-safe 방향으로 강화
 
 ## 아직 남아있는 한계
-- `DBManager`는 여전히 단일 connection/cursor 패턴이 많아, 장기적으로는 connection-per-operation 또는 repository 분리가 필요함
+- `DBManager`는 명시적 종료 경로가 생겼지만 여전히 단일 connection/cursor 패턴이 많아, 장기적으로는 connection-per-operation 또는 repository 분리가 필요함
 - 웹 검증은 아직 DDG 기반이며, 공식 공시/IR/언론을 소스 타입별로 더 엄격히 분류하지는 못함
 - 토론 품질과 시그널 성능을 정량 평가하는 백테스트/리플레이 프레임워크는 아직 초기 단계
 - 온톨로지 관계 추출은 보수적 키워드 기반이므로, 정교한 relation validation은 추가 필요

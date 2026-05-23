@@ -29,6 +29,9 @@ def main():
         print(f"- expectancy_pct: {summary['expectancy_pct']:.2f}")
         print(f"- max_drawdown_pct: {curve['max_drawdown_pct']:.2f}")
         print(f"- total_return_pct: {curve['total_return_pct']:.2f}")
+        feedback = tracker.build_feedback_report(horizon=horizon)
+        tracker.save_feedback_profile(feedback)
+        print("\n" + tracker.render_feedback_report(feedback))
         return
 
     if split_date:
@@ -45,6 +48,9 @@ def main():
         print(f"- split_date: {split_date}")
         print(f"- train_count: {train['measurement_count']} | train_avg_alpha: {train['avg_alpha_pct']:.2f} | train_mdd: {train['max_drawdown_pct']:.2f}")
         print(f"- test_count: {test['measurement_count']} | test_avg_alpha: {test['avg_alpha_pct']:.2f} | test_mdd: {test['max_drawdown_pct']:.2f}")
+        feedback = tracker.build_feedback_report(horizon=horizon)
+        tracker.save_feedback_profile(feedback)
+        print("\n" + tracker.render_feedback_report(feedback))
         return
 
     rows = engine.replay_recent(limit=limit)
@@ -60,6 +66,9 @@ def main():
     print(f"- profit_factor: {summary['profit_factor']}")
     print(f"- max_drawdown_pct: {curve['max_drawdown_pct']:.2f}")
     print(f"- total_return_pct: {curve['total_return_pct']:.2f}")
+    feedback = tracker.build_feedback_report(horizon=horizon)
+    tracker.save_feedback_profile(feedback)
+    print("\n" + tracker.render_feedback_report(feedback))
 
 
 if __name__ == "__main__":

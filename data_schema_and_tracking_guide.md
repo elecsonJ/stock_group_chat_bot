@@ -10,7 +10,7 @@
 ```
 
 ## SQLite 테이블
-현재 기본 테이블은 23개(+FTS 가상 테이블)입니다.
+현재 기본 테이블은 26개(+FTS 가상 테이블)입니다.
 
 1. `daily_news`
 - 날짜/키워드 기반 단기 뉴스 캐시
@@ -94,7 +94,15 @@
 23. `investment_review_triggers`
 - add/reduce/exit/hedge/monitor review 트리거 저장
 
-24. `debates_fts`, `summaries_fts` (FTS5 virtual table)
+24. `event_intake_audits`
+- 뉴스 이벤트가 시그널 엔진에서 왜 무시/모니터/토론/승인 경로로 갔는지 저장
+- source count, article count, confidence, verification verdict, route, reason, decision payload 포함
+
+25. `context_selection_audits`
+- News Context Pack, RAG, 토론 매니저가 AI에게 어떤 컨텍스트를 골랐는지 저장
+- 선택된 이벤트/근거, 제외 사유, 품질 상태, 컨텍스트 budget/문자 수 포함
+
+26. `debates_fts`, `summaries_fts` (FTS5 virtual table)
 - `debates`, `summaries`의 전문 검색 인덱스
 - 트리거 기반 동기화(`INSERT/UPDATE/DELETE`)
 
@@ -124,6 +132,7 @@
 4. `signal_events.verification_json`: 신규 이벤트 웹검증 근거 요약(판정 근거)
 5. `news_context_packs.pack_json`: 토론/RAG에 투입된 뉴스 판단 패키지
 6. `signal_performance`, `performance_run_summaries`, `signal_attributions`: 사후 성과와 실패 패턴 분석 근거
+7. `event_intake_audits`, `context_selection_audits`: 데이터 반응과 AI 입력 컨텍스트의 사후 복기 근거
 
 ## 단기 시그널 운영 원칙
 1. DB의 과거 결론을 그대로 재사용하지 않고, 신규 이벤트마다 웹검증을 수행한 결과를 우선 사용합니다.

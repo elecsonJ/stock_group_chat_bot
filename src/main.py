@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # 사용자 커스텀 모듈
 from llm_client import LLMClientManager
 from crawler import InvestmentCrawler
-from web_search_agent import FactCheckAgent
+from stable_web_search_agent import FactCheckAgent
 from debate_manager import DebateController
 from db_manager import DBManager
 from data_fetcher.premium_crawler import PremiumCrawler
@@ -16,6 +16,7 @@ from signal_engine import SignalEngine
 from trading_executor import TradingExecutor
 from performance_tracker import PerformanceTracker
 from debate_job import score_debate_quality
+from data_quality import DataQualityEvaluator
 
 load_dotenv()
 
@@ -32,6 +33,7 @@ portfolio_manager = PortfolioManager()
 signal_engine = SignalEngine(db_manager)
 trading_executor = TradingExecutor(db_manager)
 performance_tracker = PerformanceTracker(db_manager)
+data_quality_evaluator = DataQualityEvaluator(db_manager)
 
 # 채널별 대화 기록(Context)을 저장하는 딕셔너리
 channel_memory = {}
@@ -376,6 +378,64 @@ async def performance_cmd(ctx):
                 f"- `{row['event_id']}` {row['ticker']} {row['horizon']} "
                 f"ret={row['return_pct']:+.2f}% alpha={row['alpha_pct']:+.2f}%"
             )
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="성과피드백")
+async def performance_feedback_cmd(ctx, horizon: str = "1d"):
+    report = performance_tracker.build_feedback_report(horizon=horizon, min_samples=3)
+    performance_tracker.save_feedback_profile(report)
+    await send_chunked(ctx, performance_tracker.render_feedback_report(report))
+
+
+@bot.command(name="데이터품질")
+async def data_quality_cmd(ctx, lookback_hours: int = 168):
+    report = data_quality_evaluator.assess(lookback_hours=lookback_hours)
+    data_quality_evaluator.save_report(report)
+    await send_chunked(ctx, data_quality_evaluator.render(report))
+
+
+@bot.command(name="이벤트감사")
+async def event_audit_cmd(ctx, event_id: str = ""):
+    rows = db_manager.list_event_intake_audits(event_id=event_id.strip().upper() or None, limit=10)
+    if not rows:
+        await ctx.send("📭 이벤트 감사 로그가 없습니다.")
+        return
+    lines = ["🧾 **[이벤트 Intake 감사]**"]
+    for row in rows:
+        quality = row.get("quality_json", {}) or {}
+        decision = row.get("decision_json", {}) or {}
+        lines.append(
+            f"- `{row.get('event_id') or row.get('event_key')}` | {row.get('created_at')} | "
+            f"route={row.get('route')} | score={row.get('score_total'):.1f}"
+        )
+        lines.append(
+            f"  reason={row.get('reason')} | sources={quality.get('source_count', 0)} "
+            f"articles={quality.get('article_count', 0)} verdict={quality.get('verification_verdict') or '-'} "
+            f"tickers={','.join(decision.get('related_tickers', []) or []) or '-'}"
+        )
+    await send_chunked(ctx, "\n".join(lines))
+
+
+@bot.command(name="컨텍스트감사")
+async def context_audit_cmd(ctx, consumer: str = ""):
+    rows = db_manager.list_context_selection_audits(consumer=consumer.strip() or None, limit=10)
+    if not rows:
+        await ctx.send("📭 컨텍스트 선택 감사 로그가 없습니다.")
+        return
+    lines = ["🧾 **[AI 컨텍스트 선택 감사]**"]
+    for row in rows:
+        selected = row.get("selected_json", {}) or {}
+        quality = row.get("quality_json", {}) or {}
+        budget = row.get("budget_json", {}) or {}
+        lines.append(
+            f"- `{row.get('consumer')}` | {row.get('created_at')} | context={row.get('context_id')[:10]} "
+            f"state={quality.get('state', '-')} score={quality.get('score', 0)}"
+        )
+        lines.append(
+            f"  query={row.get('query')[:120]} | events={len(selected.get('event_keys', []) or [])} "
+            f"research={len(selected.get('research_queries', []) or [])} chars={budget.get('rendered_chars', '-')}"
+        )
     await send_chunked(ctx, "\n".join(lines))
 
 

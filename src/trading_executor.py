@@ -9,6 +9,7 @@ from db_manager import DBManager
 from market_data_provider import MarketDataProvider
 from paper_broker import PaperBroker
 from risk_manager import RiskManager
+from yfinance_runtime import configure_yfinance_cache
 
 
 class TradingExecutor:
@@ -21,6 +22,7 @@ class TradingExecutor:
         self.broker = PaperBroker(self.db)
         self.risk_manager = RiskManager(self.db)
         self.market_data = MarketDataProvider()
+        configure_yfinance_cache(yf)
 
     def _fetch_price(self, ticker: str) -> float:
         quote = self.market_data.get_latest_quote(ticker)

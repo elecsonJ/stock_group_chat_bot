@@ -75,6 +75,16 @@ class NewsContextPackService:
             "recommended_web_queries": web_queries,
         }
         if persist:
+            self._save_context_audit(
+                pack=pack,
+                consumer="news_context_pack",
+                selected_events=decorated_events,
+                selected_research=decorated_research,
+                event_limit=event_limit,
+                evidence_limit=evidence_limit,
+                lookback_hours=lookback_hours,
+            )
+        if persist:
             self.db.save_news_context_pack(pack["query_hash"], query, pack)
         return pack
 
@@ -178,6 +188,41 @@ class NewsContextPackService:
                 f"- evidence_count={item.get('evidence_count', 0)}, source_tiers={item.get('source_tiers', [])}"
             )
         return contexts
+
+    def audit_rendered_contexts(
+        self,
+        *,
+        pack: dict[str, Any],
+        consumer: str,
+        rendered_contexts: list[str],
+        limit: int,
+        truncated_chars: int | None = None,
+    ) -> None:
+        if not pack:
+            return
+        self.db.save_context_selection_audit(
+            {
+                "context_id": pack.get("query_hash"),
+                "query": pack.get("query", ""),
+                "consumer": consumer,
+                "selected_json": {
+                    "rendered_context_count": len(rendered_contexts),
+                    "event_keys": [e.get("event_key") for e in (pack.get("events", []) or [])[:limit]],
+                    "research_queries": [r.get("query") for r in (pack.get("research", []) or [])[:limit]],
+                    "selection_reasons": ["recent", "term_match", "source_quality", "news_pack_quality"],
+                },
+                "excluded_json": {
+                    "events_not_rendered": max(0, len(pack.get("events", []) or []) - limit),
+                    "research_not_rendered": max(0, len(pack.get("research", []) or []) - limit),
+                },
+                "quality_json": pack.get("quality", {}) or {},
+                "budget_json": {
+                    "limit": limit,
+                    "truncated_chars": truncated_chars,
+                    "rendered_chars": sum(len(str(c)) for c in rendered_contexts),
+                },
+            }
+        )
 
     def query_hash(
         self,
@@ -336,6 +381,52 @@ class NewsContextPackService:
                 out.append(q.strip())
                 seen.add(qn)
         return out[:5]
+
+    def _save_context_audit(
+        self,
+        *,
+        pack: dict[str, Any],
+        consumer: str,
+        selected_events: list[dict[str, Any]],
+        selected_research: list[dict[str, Any]],
+        event_limit: int,
+        evidence_limit: int,
+        lookback_hours: int,
+    ) -> None:
+        try:
+            self.db.save_context_selection_audit(
+                {
+                    "context_id": pack.get("query_hash"),
+                    "query": pack.get("query", ""),
+                    "consumer": consumer,
+                    "selected_json": {
+                        "event_keys": [e.get("event_key") for e in selected_events],
+                        "event_scores": [
+                            {"event_key": e.get("event_key"), "ranking_score": e.get("ranking_score"), "memory_status": e.get("memory_status")}
+                            for e in selected_events[:10]
+                        ],
+                        "research_queries": [r.get("query") for r in selected_research],
+                        "research_scores": [
+                            {"query": r.get("query"), "ranking_score": r.get("ranking_score"), "source_tiers": r.get("source_tiers", [])}
+                            for r in selected_research[:10]
+                        ],
+                        "selection_reasons": ["lookback_window", "query_term_match", "source_tier", "recency"],
+                    },
+                    "excluded_json": {
+                        "not_loaded_reason": "limited_by_event_and_evidence_caps",
+                    },
+                    "quality_json": pack.get("quality", {}) or {},
+                    "budget_json": {
+                        "event_limit": event_limit,
+                        "evidence_limit": evidence_limit,
+                        "lookback_hours": lookback_hours,
+                        "event_count": len(selected_events),
+                        "research_count": len(selected_research),
+                    },
+                }
+            )
+        except Exception:
+            pass
 
     def _event_memory_status(self, event: dict[str, Any], tier_mix: dict[str, int]) -> str:
         if tier_mix.get("regulatory") or tier_mix.get("company_ir"):

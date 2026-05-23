@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
 import httpx
@@ -11,6 +12,7 @@ import json
 from data_fetcher.dart_official import DARTOfficialFetcher
 from data_fetcher.krx_kind_official import KRXKindOfficialChecker
 from data_fetcher.sec_official import SECOfficialFetcher
+from json_utils import parse_json_object
 
 class FactCheckAgent:
     def __init__(self, llm_manager):
@@ -27,6 +29,7 @@ class FactCheckAgent:
         self.max_results = 5
         self.fetch_concurrency = max(1, int(os.getenv("WEB_FETCH_CONCURRENCY", "4")))
         self.fetch_timeout_sec = max(5, int(os.getenv("WEB_FETCH_TIMEOUT_SEC", "10")))
+        self.search_query_budget = max(1, int(os.getenv("WEB_SEARCH_QUERY_BUDGET", "3")))
         self.official_domains = {
             "sec.gov", "www.sec.gov", "federalreserve.gov", "www.federalreserve.gov",
             "investor.nvidia.com", "ir.tesla.com", "investor.apple.com", "www.apple.com",
@@ -42,31 +45,98 @@ class FactCheckAgent:
             "cnbc.com", "www.cnbc.com", "finance.yahoo.com",
         }
 
+    async def _plan_fact_check_searches(self, ai_statement: str, max_queries: int | None = None) -> Dict[str, Any]:
+        budget = max(1, int(max_queries or self.search_query_budget))
+        system_prompt = (
+            "너는 투자 리서치용 claim-to-search 변환기다. 투자 의견을 내지 말고, "
+            "웹검증이 필요한 객관 주장만 분해해 검색어로 바꿔라. 반드시 JSON만 출력한다."
+        )
+        user_prompt = (
+            "[입력 주장]\n"
+            f"{ai_statement}\n\n"
+            "[출력 JSON 형식]\n"
+            "{\n"
+            '  "claims": ["검증할 객관 주장"],\n'
+            '  "search_queries": ["공식/주요 출처 확인에 적합한 검색어"],\n'
+            '  "priority": "high|medium|low",\n'
+            '  "required_sources": ["regulatory", "company_ir", "tier1_media"],\n'
+            '  "reason": "검색어를 이렇게 만든 이유"\n'
+            "}\n"
+            "규칙:\n"
+            "- 검색어는 영어 우선, 필요하면 한국어를 섞어도 된다.\n"
+            "- site:sec.gov, investor relations, Reuters 같은 출처 힌트를 적극 사용한다.\n"
+            "- 전망/의견은 주장으로 확정하지 말고, 확인 필요한 사실만 분리한다.\n"
+            f"- search_queries는 최대 {budget}개."
+        )
+        try:
+            raw = await self.llm_manager.get_local_response(
+                system_prompt,
+                user_prompt,
+                profile="claim_search",
+            )
+            parsed = parse_json_object(raw) or {}
+        except Exception:
+            parsed = {}
+
+        queries = []
+        for q in parsed.get("search_queries", []) if isinstance(parsed, dict) else []:
+            qs = self._clean_search_query(str(q))
+            if qs and qs not in queries:
+                queries.append(qs)
+        if not queries:
+            queries = self._fallback_search_queries(ai_statement)
+
+        claims = parsed.get("claims", []) if isinstance(parsed, dict) else []
+        return {
+            "claims": [str(c).strip() for c in claims if str(c).strip()][:5],
+            "search_queries": queries[:budget],
+            "priority": str(parsed.get("priority", "medium") if isinstance(parsed, dict) else "medium"),
+            "required_sources": parsed.get("required_sources", []) if isinstance(parsed, dict) else [],
+            "reason": str(parsed.get("reason", "") if isinstance(parsed, dict) else ""),
+            "raw_model_output": raw if "raw" in locals() else "",
+        }
+
+    def _clean_search_query(self, query: str) -> str:
+        qs = " ".join(str(query or "").replace("\n", " ").split()).strip(" `\"'")
+        ql = qs.lower()
+        banned = {
+            "검색할 구체적인 키워드",
+            "반대 관점 키워드",
+            "search query",
+            "query",
+            "keywords",
+            "...",
+        }
+        if not qs or ql in banned or len(qs) < 4:
+            return ""
+        if "검색할 구체적인 키워드" in ql or "반대 관점 키워드" in ql:
+            return ""
+        return qs[:220]
+
+    def _fallback_search_queries(self, ai_statement: str) -> List[str]:
+        text = " ".join(str(ai_statement or "").split())
+        ticker_match = re.findall(r"\b[A-Z]{1,5}(?:\.[A-Z]{1,3})?\b", text)
+        ticker = ticker_match[0] if ticker_match else ""
+        base = text[:160]
+        queries = []
+        if ticker:
+            queries.extend(
+                [
+                    f"{ticker} investor relations latest filing guidance",
+                    f"{ticker} Reuters latest official confirmation",
+                ]
+            )
+        if base:
+            queries.append(base)
+        return list(dict.fromkeys(q for q in queries if q))[: self.search_query_budget]
+
     async def _extract_search_queries(self, ai_statement: str) -> List[str]:
         """
         1단계: AI의 긴 주장에서 '팩트체크가 필요한 핵심 키워드/문장'을 구조화된 검색어 형태로 추출
         (로컬 LLM에게 이 작업을 맡기면 가장 안전하고 똑똑함)
         """
-        prompt = (
-            "다음 [문장]에서 웹 검색에 사용할 가장 핵심적인 명사 키워드 딱 1~2개만 추출해줘.\n"
-            "예시1) '최근 1주일간 미국 연준 금리 인하 관련 기사 분석해' -> '연준 금리인하'\n"
-            "예시2) '테슬라와 BYD의 시장 점유율 비교' -> '테슬라 BYD 점유율'\n"
-            "절대 문장형태로 대답하지 말고, 특수문자나 안내 멘트 없이 검색창에 입력할 수 있는 단답형 키워드만 달랑 하나 출력해.\n"
-            f"[문장]: {ai_statement}"
-        )
-        # 로컬 모델(gpt-oss-20b)에게 추출을 시킴
-        try:
-            query = await self.llm_manager.get_local_response("너는 검색어 추출기야.", prompt, profile="extract")
-        except Exception:
-            return []
-        
-        # 모델 연결 실패 에러가 검색어로 들어가는 것을 방지
-        if not query or "Error connecting" in query or "Local Model Error" in query:
-            return []
-            
-        # 만약 모델이 말을 길게 하면 첫 줄만 쓴다든지 하는 정제 과정
-        clean_query = query.split('\n')[0].strip(' "\'')
-        return [clean_query]
+        plan = await self._plan_fact_check_searches(ai_statement, max_queries=2)
+        return plan.get("search_queries", [])[:2]
 
     def _search_web(self, query: str) -> List[Dict]:
         """2단계: 추출된 검색어로 실제 최신 웹 검색"""
@@ -111,6 +181,31 @@ class FactCheckAgent:
             return await asyncio.to_thread(self._search_web, query)
         except Exception:
             return []
+
+    async def _search_multiple_queries(self, queries: list[str]) -> list[dict]:
+        tasks = [self._search_web_async(q) for q in queries if q]
+        if not tasks:
+            return []
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        dedup: dict[str, dict] = {}
+        for batch in batches:
+            if not isinstance(batch, list):
+                continue
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                href = item.get("href", "")
+                if not href:
+                    continue
+                prev = dedup.get(href)
+                if prev is None or int(item.get("source_quality", 0) or 0) > int(prev.get("source_quality", 0) or 0):
+                    dedup[href] = item
+        ranked = sorted(
+            dedup.values(),
+            key=lambda x: (int(x.get("source_quality", 0)), len(str(x.get("body", "")))),
+            reverse=True,
+        )
+        return ranked[: self.max_results]
 
     def _safe_domain(self, url: str) -> str:
         try:
@@ -211,11 +306,20 @@ class FactCheckAgent:
             return ""
 
     async def run_deep_research_package(self, query: str) -> Dict[str, Any]:
-        search_results = await self._search_web_async(query)
+        search_plan = await self._plan_fact_check_searches(query)
+        search_queries = search_plan.get("search_queries", []) or [query]
+        search_results = await self._search_multiple_queries(search_queries)
         generated_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
         package: Dict[str, Any] = {
             "query": query,
+            "search_plan": {
+                "claims": search_plan.get("claims", []),
+                "search_queries": search_queries,
+                "priority": search_plan.get("priority", "medium"),
+                "required_sources": search_plan.get("required_sources", []),
+                "reason": search_plan.get("reason", ""),
+            },
             "generated_at_utc": generated_at,
             "status": "ok",
             "evidences": [],
@@ -226,6 +330,7 @@ class FactCheckAgent:
             package["status"] = "no_results"
             package["limitations"].append("검색 결과가 없어 증거를 생성하지 못했습니다.")
             package["summary"] = f"'{query}'에 대한 최신 검색 결과가 없습니다."
+            package["verdict"] = self._fallback_evidence_verdict(package)
             return package
 
         semaphore = asyncio.Semaphore(self.fetch_concurrency)
@@ -267,6 +372,7 @@ class FactCheckAgent:
             package["status"] = "no_extractable_evidence"
             package["limitations"].append("URL은 있었지만 본문 발췌를 확보하지 못했습니다.")
             package["summary"] = f"'{query}' 검색은 되었으나 본문 기반 증거 생성에 실패했습니다."
+            package["verdict"] = self._fallback_evidence_verdict(package)
             return package
 
         package["evidences"] = evidences
@@ -287,7 +393,91 @@ class FactCheckAgent:
         except Exception:
             package["limitations"].append("로컬 모델 요약 생성 실패: raw evidence만 제공")
             package["summary"] = "로컬 요약 실패로 원시 증거만 제공합니다. 출처 목록을 직접 검토하세요."
+        package["verdict"] = await self._build_evidence_verdict(package)
         return package
+
+    def _fallback_evidence_verdict(self, package: dict[str, Any]) -> dict[str, Any]:
+        evidences = package.get("evidences", []) if isinstance(package, dict) else []
+        source_tiers = [str(e.get("source_tier", "")) for e in evidences if isinstance(e, dict)]
+        high_quality = any(t in {"regulatory", "company_ir", "tier1_media"} for t in source_tiers)
+        status = "usable" if len(evidences) >= 2 and high_quality else "insufficient"
+        missing = []
+        if not high_quality:
+            missing.append("official_or_tier1_source")
+        if len(evidences) < 2:
+            missing.append("independent_confirmation")
+        return {
+            "status": status,
+            "ready_for_debate": bool(evidences),
+            "ready_for_signal": status == "usable",
+            "verified_claims": [],
+            "partially_supported_claims": [],
+            "unsupported_claims": [],
+            "contradictions": [],
+            "best_sources": [
+                {"domain": e.get("domain"), "tier": e.get("source_tier"), "evidence_id": e.get("evidence_id")}
+                for e in evidences[:5]
+                if isinstance(e, dict)
+            ],
+            "missing_evidence": missing,
+            "allowed_use": "signal_candidate" if status == "usable" else "discussion_only",
+            "confidence": 0.45 if status == "usable" else 0.2,
+        }
+
+    async def _build_evidence_verdict(self, package: dict[str, Any]) -> dict[str, Any]:
+        system_prompt = (
+            "너는 투자 리서치용 evidence 판정기다. 투자 결론/매수/매도 의견은 금지한다. "
+            "아래 evidence JSON만 근거로 무엇이 확인/부분확인/미확인/충돌인지 JSON으로 판정하라."
+        )
+        user_prompt = (
+            "[Evidence Package]\n"
+            f"{json.dumps(package, ensure_ascii=False, indent=2)}\n\n"
+            "[출력 JSON 형식]\n"
+            "{\n"
+            '  "status": "strong|usable|insufficient|contradictory",\n'
+            '  "ready_for_debate": true,\n'
+            '  "ready_for_signal": false,\n'
+            '  "verified_claims": [],\n'
+            '  "partially_supported_claims": [],\n'
+            '  "unsupported_claims": [],\n'
+            '  "contradictions": [],\n'
+            '  "best_sources": [{"evidence_id": "E1", "domain": "...", "tier": "..."}],\n'
+            '  "missing_evidence": [],\n'
+            '  "recommended_next_searches": [],\n'
+            '  "allowed_use": "debate_and_signal|discussion_only|needs_refresh",\n'
+            '  "confidence": 0.0\n'
+            "}\n"
+            "규칙:\n"
+            "- 공식/IR/주요언론 근거가 직접 claim을 받칠 때만 ready_for_signal=true.\n"
+            "- 검색 실패나 근거 부족은 실패가 아니라 missing_evidence로 명시.\n"
+            "- evidence에 없는 사실을 추가하지 말 것."
+        )
+        try:
+            raw = await self.llm_manager.get_local_response(
+                system_prompt,
+                user_prompt,
+                profile="evidence_verdict",
+            )
+            parsed = parse_json_object(raw) or {}
+        except Exception:
+            parsed = {}
+        fallback = self._fallback_evidence_verdict(package)
+        if not isinstance(parsed, dict) or not parsed:
+            return fallback
+        return {
+            "status": str(parsed.get("status") or fallback["status"]),
+            "ready_for_debate": bool(parsed.get("ready_for_debate", fallback["ready_for_debate"])),
+            "ready_for_signal": bool(parsed.get("ready_for_signal", fallback["ready_for_signal"])),
+            "verified_claims": parsed.get("verified_claims", []) if isinstance(parsed.get("verified_claims", []), list) else [],
+            "partially_supported_claims": parsed.get("partially_supported_claims", []) if isinstance(parsed.get("partially_supported_claims", []), list) else [],
+            "unsupported_claims": parsed.get("unsupported_claims", []) if isinstance(parsed.get("unsupported_claims", []), list) else [],
+            "contradictions": parsed.get("contradictions", []) if isinstance(parsed.get("contradictions", []), list) else [],
+            "best_sources": parsed.get("best_sources", []) if isinstance(parsed.get("best_sources", []), list) else fallback["best_sources"],
+            "missing_evidence": parsed.get("missing_evidence", []) if isinstance(parsed.get("missing_evidence", []), list) else fallback["missing_evidence"],
+            "recommended_next_searches": parsed.get("recommended_next_searches", []) if isinstance(parsed.get("recommended_next_searches", []), list) else [],
+            "allowed_use": str(parsed.get("allowed_use") or fallback["allowed_use"]),
+            "confidence": float(parsed.get("confidence", fallback["confidence"]) or 0.0),
+        }
 
     async def run_deep_research(self, query: str) -> str:
         """
@@ -306,9 +496,11 @@ class FactCheckAgent:
         return (
             f"[Evidence Package]\n"
             f"- query: {package.get('query')}\n"
+            f"- search_queries: {(package.get('search_plan') or {}).get('search_queries', [])}\n"
             f"- generated_at_utc: {package.get('generated_at_utc')}\n"
             f"- evidence_count: {len(package.get('evidences', []))}\n"
             f"- limitations: {package.get('limitations', [])}\n\n"
+            f"[로컬 Evidence Verdict]\n{json.dumps(package.get('verdict', {}), ensure_ascii=False, indent=2)}\n\n"
             f"[요약]\n{summary}\n\n"
             f"[출처 목록]\n{sources}"
         )

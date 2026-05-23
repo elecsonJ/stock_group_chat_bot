@@ -16,6 +16,9 @@ class SignalEngine:
 
     def __init__(self, db: DBManager | None = None):
         self.db = db or DBManager()
+        self._owns_db = db is None
+        self.ontology = None
+        self.planner = None
         self.verify_budget_default = max(1, int(os.getenv("SIGNAL_VERIFY_BUDGET", "3")))
         self.recency_hours_default = max(6, int(os.getenv("SIGNAL_RECENCY_HOURS", "36")))
         self.debate_auto_min_score = max(50.0, float(os.getenv("DEBATE_AUTO_MIN_SCORE", "75")))
@@ -89,6 +92,34 @@ class SignalEngine:
             "bankruptcy", "fraud", "probe", "investigation", "recall", "ban", "ceo resign",
             "파산", "회계", "수사", "리콜", "금지", "사임",
         )
+
+    def close(self):
+        if self.planner is not None:
+            self.planner = None
+        if self.ontology is not None:
+            try:
+                self.ontology.close()
+            except Exception:
+                pass
+            self.ontology = None
+        if self._owns_db:
+            try:
+                self.db.close()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _build_ontology_plan(self, event: dict[str, Any]) -> dict[str, Any]:
         if self.planner is None:
@@ -426,6 +457,51 @@ class SignalEngine:
         h = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10].upper()
         return f"SG{h}"
 
+    def _save_intake_audit(
+        self,
+        *,
+        event: dict[str, Any],
+        event_id: str,
+        route: str,
+        reason: str,
+        eval_data: dict[str, Any] | None = None,
+        verification: dict[str, Any] | None = None,
+        ontology_plan: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            score_json = (eval_data or {}).get("score_json", {}) or {}
+            hidden_candidates = (ontology_plan or {}).get("hidden_candidates", []) or []
+            self.db.save_event_intake_audit(
+                {
+                    "event_id": event_id,
+                    "event_key": event.get("event_key"),
+                    "audit_stage": "signal_intake",
+                    "route": route,
+                    "reason": reason,
+                    "score_total": float((eval_data or {}).get("score_total", 0.0) or 0.0),
+                    "quality_json": {
+                        "source_count": int(event.get("source_count", 0) or 0),
+                        "article_count": int(event.get("article_count", 0) or 0),
+                        "confidence": float(event.get("confidence", 0.0) or 0.0),
+                        "verification_verdict": (verification or {}).get("verdict", ""),
+                        "evidence_count": int((verification or {}).get("evidence_count", 0) or 0),
+                        "source_tiers": (verification or {}).get("source_tiers", []),
+                        "hidden_candidate_count": len(hidden_candidates),
+                    },
+                    "decision_json": {
+                        "direction": (eval_data or {}).get("direction"),
+                        "urgency": (eval_data or {}).get("urgency"),
+                        "related_tickers": (eval_data or {}).get("related_tickers", []),
+                        "portfolio_hit": bool(score_json.get("portfolio_hit", False)),
+                        "impact_keywords": score_json.get("impact_keywords", []),
+                        "extra": extra or {},
+                    },
+                }
+            )
+        except Exception:
+            pass
+
     def _extract_related_tickers(self, text: str, portfolio_tickers: list[str]) -> tuple[list[str], bool]:
         tickers = []
         seen = set()
@@ -610,8 +686,24 @@ class SignalEngine:
 
         evidence_count = len(evidences)
         domain_count = len(domains)
-        verdict = "verified" if evidence_count >= 2 and domain_count >= 2 else "insufficient"
-        confidence = min(0.95, 0.2 + 0.08 * domain_count + 0.05 * min(evidence_count, 8))
+        local_verdict = package.get("verdict", {}) if isinstance(package, dict) else {}
+        local_status = str(local_verdict.get("status", "")).strip().lower() if isinstance(local_verdict, dict) else ""
+        ready_for_signal = bool(local_verdict.get("ready_for_signal", False)) if isinstance(local_verdict, dict) else False
+        has_local_verdict = bool(local_verdict) if isinstance(local_verdict, dict) else False
+        if not has_local_verdict:
+            verdict = "verified" if evidence_count >= 2 and domain_count >= 2 else "insufficient"
+        elif local_status == "contradictory":
+            verdict = "contradicted"
+        elif ready_for_signal or local_status in {"strong", "usable"}:
+            verdict = "verified"
+        else:
+            verdict = "insufficient"
+        heuristic_confidence = min(0.95, 0.2 + 0.08 * domain_count + 0.05 * min(evidence_count, 8))
+        try:
+            local_confidence = float(local_verdict.get("confidence", 0.0)) if isinstance(local_verdict, dict) else 0.0
+        except Exception:
+            local_confidence = 0.0
+        confidence = max(heuristic_confidence, local_confidence) if verdict == "verified" else min(heuristic_confidence, local_confidence or heuristic_confidence)
         score_bonus = min(18.0, float(domain_count * 2 + evidence_count * 1.5))
         if verdict != "verified":
             score_bonus = -8.0
@@ -634,6 +726,11 @@ class SignalEngine:
             "bear_hits": bear_hits[:6],
             "summary": package.get("summary", "") if isinstance(package, dict) else "",
             "limitations": package.get("limitations", []) if isinstance(package, dict) else [],
+            "local_verdict": local_verdict if isinstance(local_verdict, dict) else {},
+            "missing_evidence": local_verdict.get("missing_evidence", []) if isinstance(local_verdict, dict) else [],
+            "unsupported_claims": local_verdict.get("unsupported_claims", []) if isinstance(local_verdict, dict) else [],
+            "recommended_next_searches": local_verdict.get("recommended_next_searches", []) if isinstance(local_verdict, dict) else [],
+            "allowed_use": local_verdict.get("allowed_use", "") if isinstance(local_verdict, dict) else "",
             "score_bonus": round(score_bonus, 2),
             "evidence_ids": evidence_ids,
             "verified_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
@@ -685,15 +782,30 @@ class SignalEngine:
         out = []
         verify_used = 0
         for e in events:
+            event_id = self._build_event_id(e)
             if not self._is_recent_event(e, recency_hours=recency_hours_val):
+                self._save_intake_audit(
+                    event=e,
+                    event_id=event_id,
+                    route="skipped_stale",
+                    reason="event_outside_recency_window",
+                    extra={"recency_hours": recency_hours_val},
+                )
                 continue
             eval_data = self._score_event(e, portfolio_tickers=portfolio_tickers)
             score_total = float(eval_data.get("score_total", 0.0))
             portfolio_hit = bool((eval_data.get("score_json") or {}).get("portfolio_hit", False))
             if score_total < threshold and not portfolio_hit:
+                self._save_intake_audit(
+                    event=e,
+                    event_id=event_id,
+                    route="ignored_below_threshold",
+                    reason="score_below_threshold_without_portfolio_hit",
+                    eval_data=eval_data,
+                    extra={"threshold": threshold},
+                )
                 continue
 
-            event_id = self._build_event_id(e)
             existing = self.db.get_signal_event(event_id)
             existed = existing is not None
             existing_status = str((existing or {}).get("status", "")).strip().lower()
@@ -789,6 +901,34 @@ class SignalEngine:
                     ontology_plan=ontology_plan,
                     portfolio_tickers=portfolio_tickers,
                 )
+            if is_terminal_event:
+                route = f"terminal_{existing_status}"
+                reason = "existing_terminal_state_preserved"
+            elif recs:
+                route = "approval_request"
+                reason = "verified_or_unverified_budget_path_created_recommendations"
+            elif debate_queue_result.get("created") or debate_queue_result.get("merged"):
+                route = "debate_queue"
+                reason = str(debate_queue_result.get("reason") or "debate_policy_matched")
+            else:
+                route = "monitor_only"
+                reason = "not_actionable_or_verification_insufficient"
+            self._save_intake_audit(
+                event=e,
+                event_id=event_id,
+                route=route,
+                reason=reason,
+                eval_data=eval_data,
+                verification=verification or {},
+                ontology_plan=ontology_plan,
+                extra={
+                    "threshold": threshold,
+                    "verify_used": verify_used,
+                    "debate_queue": debate_queue_result,
+                    "review_trigger_count": len(review_triggers),
+                    "recommendation_count": len(recs),
+                },
+            )
             out.append(
                 {
                     "event_id": event_id,

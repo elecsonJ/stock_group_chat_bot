@@ -113,6 +113,7 @@ RISK_MAX_OPEN_POSITIONS=4
 .\run_signals.bat
 .\run_debates.bat
 .\run_replay.bat
+.\run_data_quality.bat
 .\run_maintenance.bat
 ```
 
@@ -163,6 +164,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_
 - `StockBot\Maintenance`: 매일 03:30 DB 단기 캐시/뉴스팩/시그널 로그 정리
 - `StockBot\ReplayHourly`: 선택, 매시간 리플레이
 - `StockBot\DiscordBotOnLogon`: 선택, 윈도우 로그온 시 디스코드 봇 실행
+
+`run_data_quality.bat`은 별도 기본 스케줄러 작업으로 등록하지 않지만, 수동 점검 또는 replay 이후 검증에 사용합니다. 최신 리포트는 `system_metadata.data_quality_report_v1`에 저장됩니다.
 
 ## 작업 제거
 스케줄러 작업을 제거하려면 다음을 실행합니다.

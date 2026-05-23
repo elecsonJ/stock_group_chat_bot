@@ -15,6 +15,10 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 - `!토론승인 [EVENT_ID]`, `!토론보류 [EVENT_ID]`, `!토론품질 [ID]`: 비용 게이트에 걸린 자동 토론을 승인/보류하고 토론 품질 점수를 확인합니다.
 - `!변화트리거`: 열린 투자 변화 트리거(`add_review`, `reduce_review`, `exit_review`, `hedge_review`)를 확인합니다.
 - `!성과`: replay/performance에 누적된 시그널 성과 요약을 확인합니다.
+- `!성과피드백 [horizon]`: replay 성과를 signal score/source tier/debate quality 등 조건별 attribution으로 분해해 강화/주의 후보를 확인합니다.
+- `!데이터품질 [lookback_hours]`: 뉴스 수집, 웹검증, 뉴스팩, 시그널, replay 측정 커버리지를 점수화해 확인합니다.
+- `!이벤트감사 [EVENT_ID]`: 이벤트가 왜 무시/모니터/토론/승인 경로로 갔는지 Intake 로그를 확인합니다.
+- `!컨텍스트감사 [consumer]`: RAG/토론/뉴스팩이 AI에게 어떤 컨텍스트를 골랐는지 선택 로그를 확인합니다.
 - `!승인 [EVENT_ID]`: 승인 후 즉시 페이퍼 체결을 실행합니다.
 - `!거부 [EVENT_ID]`: 승인 대기 이벤트를 거부합니다.
 - `!자동매매중지`, `!자동매매재개`, `!가드레일`: 실행 회로 차단기와 주문 한도를 점검합니다.
@@ -39,6 +43,9 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 - **Fail-safe Paper Execution**: 가격 조회에 실패하면 `$1` 대체 체결을 하지 않고 실행을 중단합니다.
 - **Paper Broker State**: 페이퍼 체결은 단순 로그가 아니라 계좌 현금, 포지션 평균단가, realized/unrealized PnL, 주문/체결 이력까지 갱신합니다.
 - **Replay And Performance Tracking**: 실행 또는 시그널 기준 entry를 바탕으로 `15m/1h/1d/3d` 성과와 benchmark alpha를 기록할 수 있습니다.
+- **Performance Feedback Loop**: replay 결과를 source tier, signal score, 검증 상태, 토론 품질, hidden candidate bucket별 attribution으로 묶어 다음 운영 정책의 강화/주의 후보를 만듭니다.
+- **Data Quality Evaluation**: 수집 신선도, 커버리지, 공식/주요 출처 비중, 웹검증 커버리지, 데이터 관리 상태, 성과 측정 커버리지를 `data_quality.v1` 리포트로 점검합니다.
+- **Audit Trails**: `event_intake_audits`, `context_selection_audits`가 이벤트 라우팅 이유와 AI 컨텍스트 선택 이유를 남겨, 판단 실패가 모델 문제인지 입력 컨텍스트 문제인지 복기할 수 있게 합니다.
 - **Out-of-sample Replay**: `run_replay.bat`와 `REPLAY_SPLIT_DATE`를 사용해 train/test 구간을 나눈 replay와 MDD/equity curve를 저장할 수 있습니다.
 - **Execution Realism**: paper execution은 기본 slippage/spread/urgency penalty를 반영하고, replay는 stop rule/TTL 기반 조기 청산을 반영합니다.
 - **Ontology-Aware Planning**: 토론 시작 전에 온톨로지 플래너가 엔티티 링크/관계 확장 기반으로 `tickers`, `web_queries`, `rag_keywords`를 구성합니다.
@@ -81,7 +88,8 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 - `run_debates.bat`: 이벤트 기반 또는 10분~15분마다 실행(자동 토론 큐 소비)
 - `run_replay.bat`: 필요 시 실행(최근 실행/시그널 성과 재측정)
   - `REPLAY_SPLIT_DATE=2026-01-01`를 주면 train/test 분리 replay 실행
-- `run_local_healthcheck.bat`: 로컬 모델 프로파일(`json/extract/evidence/judge`) 품질/지연 점검
+- `run_data_quality.bat`: 필요 시 실행(수집/검증/뉴스팩/replay 커버리지 품질 점검)
+- `run_local_healthcheck.bat`: 로컬 모델 프로파일(`json/extract/claim_search/evidence/evidence_verdict/judge`) 품질/지연 점검
 - `run_maintenance.bat`: 매일 실행(DB 단기 캐시/뉴스팩/시그널 로그 보존기간 정리, `RETENTION_DAYS`)
 - `run_bot.bat`: 디스코드 봇 실행(윈도우 로그온 자동 실행 옵션과 함께 사용 가능)
 - 작업 스케줄러 자동 등록: `powershell -File scripts\windows\install_scheduled_tasks.ps1`
@@ -124,3 +132,8 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 - 윈도우 데스크탑 자동화 가이드: `WINDOWS_DESKTOP_AUTOMATION_GUIDE.md`
 - 2026-05-05 구현/문서 정리 기록: `IMPLEMENTATION_RECORD_2026-05-05.md`
 - 재가동 가이드: `System Restart Guide`
+## 2026-05-24 Operating Notes
+
+- Local LLM routing now supports per-profile model overrides such as `LOCAL_MODEL_NAME_EVIDENCE_VERDICT` and `LOCAL_MODEL_NAME_JUDGE`. Recommended production posture is hybrid: e4b for fast/high-volume helper work, 31B for evidence verdicts, judge-style arbitration, and long evidence summaries.
+- Market data currently works as reference data through yfinance/Yahoo Finance via `MarketDataProvider`. It is useful for paper execution, portfolio PnL, replay, and basic price context, but it is not yet execution-grade live quote/tick data.
+- For real investment use, news should be evaluated together with pre/post event price movement, volume, sector/benchmark relative return, and whether the move happened before the news reached public feeds. That market-reaction context is a next hardening priority.

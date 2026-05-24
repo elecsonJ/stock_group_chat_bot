@@ -20,6 +20,12 @@ class StubTradingExecutor(TradingExecutor):
     def _fetch_price(self, ticker: str) -> float:
         return float(self._prices.get(ticker, 0.0))
 
+    def _fetch_price_with_quality(self, ticker: str) -> tuple[float, dict]:
+        price = self._fetch_price(ticker)
+        if price > 0:
+            return price, {"state": "reference", "tradable": True}
+        return 0.0, {"state": "missing", "tradable": False, "reasons": ["missing_quote"]}
+
     def _fetch_market_context(self, ticker: str) -> dict[str, float]:
         return {}
 

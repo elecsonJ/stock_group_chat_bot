@@ -38,6 +38,9 @@ class FakeMarketData:
     def assess_quote_quality(self, quote, max_age_minutes=30):
         return {"state": "reference", "tradable": True, "price": quote.price}
 
+    def benchmark_for_ticker(self, ticker):
+        return "SPY"
+
 
 class MarketReactionAndReadinessTests(unittest.TestCase):
     def setUp(self):

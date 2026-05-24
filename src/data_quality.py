@@ -41,6 +41,7 @@ class DataQualityEvaluator:
         context_audits = self.db.list_context_selection_audits(limit=limit)
         market_reactions = self.db.list_market_reaction_snapshots(limit=limit)
         reconciliations = self.db.list_reconciliation_runs(limit=10)
+        market_data_report = self._latest_market_data_report()
 
         latest_news_at = self._max_dt(
             [e.get("updated_at") or e.get("date") for e in events]
@@ -102,16 +103,18 @@ class DataQualityEvaluator:
             "performance_feedback": round(performance_coverage * 100.0, 2),
             "market_reaction": round(min(100.0, (len(market_reactions) / max(1, signal_count)) * 100.0), 2) if signal_count else 0.0,
             "reconciliation": 100.0 if reconciliations and reconciliations[0].get("status") == "ok" else 0.0,
+            "market_data_connectivity": self._market_data_connectivity_score(market_data_report),
         }
         overall = round(
-            scores["freshness"] * 0.2
-            + scores["coverage"] * 0.2
-            + scores["source_quality"] * 0.18
-            + scores["verification"] * 0.18
-            + scores["management"] * 0.14
+            scores["freshness"] * 0.19
+            + scores["coverage"] * 0.19
+            + scores["source_quality"] * 0.17
+            + scores["verification"] * 0.17
+            + scores["management"] * 0.13
             + scores["performance_feedback"] * 0.06
             + scores["market_reaction"] * 0.03
-            + scores["reconciliation"] * 0.01,
+            + scores["reconciliation"] * 0.01
+            + scores["market_data_connectivity"] * 0.05,
             2,
         )
 
@@ -132,6 +135,7 @@ class DataQualityEvaluator:
                 "context_selection_audit_count": len(context_audits),
                 "market_reaction_snapshot_count": len(market_reactions),
                 "reconciliation_run_count": len(reconciliations),
+                "market_data_connectivity_status": (market_data_report or {}).get("overall_status", "missing"),
                 "latest_news_at": latest_news_at.strftime("%Y-%m-%dT%H:%M:%S") if latest_news_at else None,
                 "latest_research_at": latest_research_at.strftime("%Y-%m-%dT%H:%M:%S") if latest_research_at else None,
                 "latest_pack_at": latest_pack_at.strftime("%Y-%m-%dT%H:%M:%S") if latest_pack_at else None,
@@ -153,9 +157,10 @@ class DataQualityEvaluator:
                 "context_audit_coverage": round((len(context_audits) / max(1, pack_count)), 4) if pack_count else 0.0,
                 "market_reaction_coverage": round((len(market_reactions) / max(1, signal_count)), 4) if signal_count else 0.0,
                 "latest_reconciliation_status": reconciliations[0].get("status") if reconciliations else "missing",
+                "market_data_connectivity_checks": len((market_data_report or {}).get("checks", [])),
                 "checkpoint_failure_count": len(checkpoint_failures),
             },
-            "recommendations": self._recommendations(scores, event_count, article_count, research_count, pack_count, verification_coverage, performance_coverage, high_quality_article_ratio, checkpoint_failures, len(event_audits), len(context_audits)),
+            "recommendations": self._recommendations(scores, event_count, article_count, research_count, pack_count, verification_coverage, performance_coverage, high_quality_article_ratio, checkpoint_failures, len(event_audits), len(context_audits), market_data_report),
         }
 
     def render(self, report: dict[str, Any]) -> str:
@@ -169,6 +174,7 @@ class DataQualityEvaluator:
             f"source={scores.get('source_quality', 0.0):.1f} verification={scores.get('verification', 0.0):.1f} "
             f"management={scores.get('management', 0.0):.1f} feedback={scores.get('performance_feedback', 0.0):.1f}",
             f"- market_reaction={scores.get('market_reaction', 0.0):.1f} reconciliation={scores.get('reconciliation', 0.0):.1f}",
+            f"- market_data_connectivity={scores.get('market_data_connectivity', 0.0):.1f} status={collection.get('market_data_connectivity_status', 'missing')}",
             f"- events={collection.get('event_count', 0)} articles={collection.get('article_count', 0)} "
             f"research={collection.get('research_count', 0)} packs={collection.get('news_context_pack_count', 0)} "
             f"signals={collection.get('signal_count', 0)} measurements={collection.get('performance_measurement_count', 0)}",
@@ -187,6 +193,26 @@ class DataQualityEvaluator:
 
     def save_report(self, report: dict[str, Any]) -> None:
         self.db.set_system_metadata("data_quality_report_v1", json.dumps(report, ensure_ascii=False))
+
+    def _latest_market_data_report(self) -> dict[str, Any] | None:
+        raw = self.db.get_system_metadata("market_data_connectivity_report_v1")
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else None
+        except Exception:
+            return None
+
+    def _market_data_connectivity_score(self, report: dict[str, Any] | None) -> float:
+        if not report:
+            return 0.0
+        status = str(report.get("overall_status") or "").lower()
+        if status == "ok":
+            return 100.0
+        if status == "warn":
+            return 50.0
+        return 0.0
 
     def _list_recent_packs(self, since_dt: datetime, limit: int = 1000) -> list[dict[str, Any]]:
         self.db.cursor.execute(
@@ -281,6 +307,7 @@ class DataQualityEvaluator:
         checkpoint_failures: list[dict[str, Any]],
         event_audit_count: int,
         context_audit_count: int,
+        market_data_report: dict[str, Any] | None,
     ) -> list[str]:
         recs = []
         if event_count == 0 or scores.get("freshness", 0.0) < 65:
@@ -295,6 +322,10 @@ class DataQualityEvaluator:
             recs.append("run_news_context 작업을 실행해 토론/RAG 입력용 뉴스팩을 생성하세요.")
         if performance_coverage < 0.5:
             recs.append("run_replay를 주기 실행해 시그널별 성과 측정치를 더 쌓으세요.")
+        if not market_data_report:
+            recs.append("run_market_data_check를 실행해 미국/한국/홍콩/일본 등 시장별 가격 조회 상태를 검증하세요.")
+        elif str(market_data_report.get("overall_status") or "").lower() != "ok":
+            recs.append("market_data_connectivity_report_v1의 실패/경고 항목을 보고 종목별 provider_ticker나 시장 힌트를 보정하세요.")
         if event_count > 0 and event_audit_count == 0:
             recs.append("이벤트 Intake 감사 로그가 없습니다. run_signals로 라우팅 이유를 남기세요.")
         if pack_count > 0 and context_audit_count == 0:

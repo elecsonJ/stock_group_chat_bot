@@ -22,6 +22,7 @@ $TaskCommands = @{
     "signals"       = Join-Path $Root "run_signals.bat"
     "debates"       = Join-Path $Root "run_debates.bat"
     "replay"        = Join-Path $Root "run_replay.bat"
+    "market_data_check" = Join-Path $Root "run_market_data_check.bat"
     "daily"         = Join-Path $Root "run_daily.bat"
     "weekly"        = Join-Path $Root "run_weekly.bat"
     "monthly"       = Join-Path $Root "run_monthly.bat"
@@ -57,6 +58,7 @@ Register-Schtask -Name "DailySummary" -ScheduleArgs @("/SC", "DAILY", "/ST", "23
 Register-Schtask -Name "WeeklySummary" -ScheduleArgs @("/SC", "WEEKLY", "/D", "SUN", "/ST", "23:40") -Job "weekly"
 Register-Schtask -Name "MonthlySummary" -ScheduleArgs @("/SC", "MONTHLY", "/D", "1", "/ST", "23:50") -Job "monthly"
 Register-Schtask -Name "LocalHealthcheck" -ScheduleArgs @("/SC", "DAILY", "/ST", "08:30") -Job "healthcheck"
+Register-Schtask -Name "MarketDataCheck" -ScheduleArgs @("/SC", "DAILY", "/ST", "08:45") -Job "market_data_check"
 Register-Schtask -Name "Maintenance" -ScheduleArgs @("/SC", "DAILY", "/ST", "03:30") -Job "maintenance"
 
 if ($IncludeReplayHourly) {

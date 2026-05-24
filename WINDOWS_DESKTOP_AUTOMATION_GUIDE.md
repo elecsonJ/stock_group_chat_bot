@@ -113,6 +113,7 @@ RISK_MAX_OPEN_POSITIONS=4
 .\run_signals.bat
 .\run_debates.bat
 .\run_replay.bat
+.\run_market_data_check.bat
 .\run_data_quality.bat
 .\run_maintenance.bat
 ```
@@ -161,6 +162,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_
 - `StockBot\WeeklySummary`: 매주 일요일 23:40 주간 요약
 - `StockBot\MonthlySummary`: 매월 1일 23:50 월간 요약
 - `StockBot\LocalHealthcheck`: 매일 08:30 로컬 모델 점검
+- `StockBot\MarketDataCheck`: 매일 08:45 시장별 가격 데이터 연결성 점검
 - `StockBot\Maintenance`: 매일 03:30 DB 단기 캐시/뉴스팩/시그널 로그 정리
 - `StockBot\ReplayHourly`: 선택, 매시간 리플레이
 - `StockBot\DiscordBotOnLogon`: 선택, 윈도우 로그온 시 디스코드 봇 실행

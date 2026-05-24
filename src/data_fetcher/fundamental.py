@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from data_fetcher.dart_official import DARTOfficialFetcher
 from data_fetcher.krx_kind_official import KRXKindOfficialChecker
 from data_fetcher.sec_official import SECOfficialFetcher
+from market_data_provider import MarketDataProvider
 from yfinance_runtime import configure_yfinance_cache
 
 class AdvancedDataFetcher:
@@ -14,6 +15,7 @@ class AdvancedDataFetcher:
         self.dart_fetcher = DARTOfficialFetcher()
         self.krx_kind_checker = KRXKindOfficialChecker()
         self.sec_fetcher = SECOfficialFetcher()
+        self.market_data = MarketDataProvider()
         configure_yfinance_cache(yf)
 
     async def get_comprehensive_stock_data(self, ticker: str) -> str:
@@ -28,7 +30,10 @@ class AdvancedDataFetcher:
             if yf is None:
                 return f"[{t_name}] yfinance is not installed; market/technical reference data is unavailable.\n"
             try:
-                stock = yf.Ticker(t_name)
+                instrument = self.market_data.resolve_instrument(t_name)
+                provider_ticker = instrument.provider_ticker if instrument else str(t_name or "").upper().strip()
+                benchmark_ticker = instrument.benchmark_ticker if instrument else "SPY"
+                stock = yf.Ticker(provider_ticker)
                 info = stock.info
                 
                 # 1. 기본 가치평가 및 성장 지표
@@ -70,7 +75,7 @@ class AdvancedDataFetcher:
                 
                 # 재무 데이터 텍스트 구축
                 fund_text = (
-                    f"**[비공식 시장/밸류에이션 보조 데이터: {t_name.upper()} | yfinance/Yahoo Finance]**\n"
+                    f"**[비공식 시장/밸류에이션 보조 데이터: {provider_ticker.upper()} | yfinance/Yahoo Finance]**\n"
                     f"- **신뢰도 주의**: 아래 현재가/밸류에이션/수급 지표는 공식 공시나 브로커 호가가 아니며, 실제 투자 전 별도 확인이 필요합니다.\n"
                     f"- **섹터/산업**: {sector} / {industry}\n"
                     f"- **현재가**: {current_price} {currency} | **시가총액**: {self._format_market_cap(market_cap, currency)}\n"
@@ -162,7 +167,7 @@ class AdvancedDataFetcher:
                         
                 # SPY(S&P 500 ETF) YTD 비교용
                 try:
-                    spy = yf.Ticker("SPY")
+                    spy = yf.Ticker(benchmark_ticker)
                     spy_ytd = spy.history(period="ytd")
                     spy_perf = "N/A"
                     if not spy_ytd.empty and len(spy_ytd) > 0:
@@ -176,7 +181,7 @@ class AdvancedDataFetcher:
 
                 alpha_text = (
                     f"- **알파 지표 (Alpha & Momentum)**:\n"
-                    f"  - 연초 대비(YTD) 수익률: {t_name.upper()} {ytd_perf} vs 시장(SPY) {spy_perf}\n"
+                    f"  - 연초 대비(YTD) 수익률: {provider_ticker.upper()} {ytd_perf} vs 시장({benchmark_ticker}) {spy_perf}\n"
                 )
 
                 return fund_text + tech_text + alpha_text

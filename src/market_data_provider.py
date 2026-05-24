@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,6 +25,17 @@ class PriceQuote:
     detail: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class MarketInstrument:
+    requested_ticker: str
+    provider_ticker: str
+    market: str = "unknown"
+    country: str = ""
+    exchange_hint: str = ""
+    currency_hint: str = ""
+    benchmark_ticker: str = "SPY"
+
+
 class MarketDataProvider:
     """
     시장 가격 provider 추상화.
@@ -35,6 +47,7 @@ class MarketDataProvider:
     def __init__(self):
         self.provider = os.getenv("MARKET_DATA_PROVIDER", "yfinance").strip().lower()
         self._history_cache: dict[tuple[str, str, str, str], Any] = {}
+        self._resolution_cache: dict[str, MarketInstrument | None] = {}
         configure_yfinance_cache(yf)
 
     def get_latest_quote(self, ticker: str) -> PriceQuote | None:
@@ -82,12 +95,238 @@ class MarketDataProvider:
             return None
         return self._get_yfinance_historical_quote(ticker, when)
 
+    def resolve_instrument(self, ticker: str) -> MarketInstrument | None:
+        requested = str(ticker or "").strip()
+        if not requested:
+            return None
+        cache_key = requested.upper()
+        if cache_key in self._resolution_cache:
+            return self._resolution_cache[cache_key]
+        candidates = self._ticker_candidates(requested)
+        if not candidates:
+            self._resolution_cache[cache_key] = None
+            return None
+        if yf is None:
+            resolved = candidates[0]
+            self._resolution_cache[cache_key] = resolved
+            return resolved
+        for candidate in candidates:
+            if self._candidate_has_data(candidate.provider_ticker):
+                self._resolution_cache[cache_key] = candidate
+                return candidate
+        self._resolution_cache[cache_key] = candidates[0]
+        return candidates[0]
+
+    def benchmark_for_ticker(self, ticker: str) -> str:
+        instrument = self.resolve_instrument(ticker)
+        return instrument.benchmark_ticker if instrument else "SPY"
+
+    def _ticker_candidates(self, ticker: str) -> list[MarketInstrument]:
+        raw = str(ticker or "").strip()
+        if not raw:
+            return []
+        text = raw.upper().replace(" ", "")
+        market_hint = ""
+        symbol = text
+        if ":" in text:
+            market_hint, symbol = text.split(":", 1)
+            market_hint = self._normalize_market_hint(market_hint)
+
+        if self._looks_like_yahoo_symbol(symbol):
+            return [self._instrument(raw, symbol, market_hint or self._market_from_suffix(symbol))]
+
+        if market_hint:
+            hinted = self._symbol_for_market(symbol, market_hint)
+            resolved_market = self._market_from_suffix(hinted) if market_hint == "china" else market_hint
+            return [self._instrument(raw, hinted, resolved_market)] if hinted else []
+
+        if re.fullmatch(r"\d{6}", symbol):
+            candidates = [
+                self._instrument(raw, f"{symbol}.KS", "korea_kospi"),
+                self._instrument(raw, f"{symbol}.KQ", "korea_kosdaq"),
+            ]
+            if symbol.startswith(("0", "3")):
+                candidates.append(self._instrument(raw, f"{symbol}.SZ", "china_shenzhen"))
+            if symbol.startswith(("5", "6", "9")):
+                candidates.append(self._instrument(raw, f"{symbol}.SS", "china_shanghai"))
+            return candidates
+        if re.fullmatch(r"\d{4}", symbol):
+            return [
+                self._instrument(raw, f"{symbol}.HK", "hong_kong"),
+                self._instrument(raw, f"{symbol}.T", "japan"),
+            ]
+        if re.fullmatch(r"\d{5}", symbol):
+            return [self._instrument(raw, f"{symbol}.T", "japan")]
+        if "-" in symbol or symbol.endswith("=X"):
+            return [self._instrument(raw, symbol, "global")]
+        return [self._instrument(raw, symbol, "united_states")]
+
+    def _normalize_market_hint(self, hint: str) -> str:
+        aliases = {
+            "US": "united_states",
+            "USA": "united_states",
+            "NASDAQ": "united_states",
+            "NYSE": "united_states",
+            "AMEX": "united_states",
+            "KR": "korea",
+            "KOR": "korea",
+            "KOREA": "korea",
+            "KOSPI": "korea_kospi",
+            "KOSDAQ": "korea_kosdaq",
+            "JP": "japan",
+            "JPN": "japan",
+            "TOKYO": "japan",
+            "HK": "hong_kong",
+            "HKG": "hong_kong",
+            "CN": "china",
+            "SH": "china_shanghai",
+            "SS": "china_shanghai",
+            "SZ": "china_shenzhen",
+            "UK": "united_kingdom",
+            "LSE": "united_kingdom",
+            "GB": "united_kingdom",
+            "CA": "canada",
+            "TSX": "canada_tsx",
+            "TSXV": "canada_tsxv",
+            "AU": "australia",
+            "ASX": "australia",
+            "IN": "india_nse",
+            "NSE": "india_nse",
+            "BSE": "india_bse",
+            "DE": "germany",
+            "XETRA": "germany",
+            "FR": "france",
+            "PA": "france",
+            "SG": "singapore",
+            "BR": "brazil",
+            "MX": "mexico",
+        }
+        normalized = re.sub(r"[^A-Z0-9]", "", str(hint or "").upper())
+        return aliases.get(normalized, normalized.lower())
+
+    def _symbol_for_market(self, symbol: str, market: str) -> str:
+        symbol = str(symbol or "").upper().strip()
+        if not symbol:
+            return ""
+        if market == "united_states":
+            return symbol
+        if market in {"korea", "korea_kospi"}:
+            return f"{symbol.zfill(6)}.KS" if symbol.isdigit() else f"{symbol}.KS"
+        if market == "korea_kosdaq":
+            return f"{symbol.zfill(6)}.KQ" if symbol.isdigit() else f"{symbol}.KQ"
+        if market == "japan":
+            return f"{symbol}.T"
+        if market == "hong_kong":
+            return f"{symbol.zfill(4)}.HK" if symbol.isdigit() else f"{symbol}.HK"
+        if market == "china":
+            return f"{symbol}.SZ" if symbol.startswith(("0", "3")) else f"{symbol}.SS"
+        suffix_by_market = {
+            "china_shanghai": ".SS",
+            "china_shenzhen": ".SZ",
+            "united_kingdom": ".L",
+            "canada_tsx": ".TO",
+            "canada": ".TO",
+            "canada_tsxv": ".V",
+            "australia": ".AX",
+            "india_nse": ".NS",
+            "india_bse": ".BO",
+            "germany": ".DE",
+            "france": ".PA",
+            "singapore": ".SI",
+            "brazil": ".SA",
+            "mexico": ".MX",
+        }
+        suffix = suffix_by_market.get(market)
+        return f"{symbol}{suffix}" if suffix else symbol
+
+    def _looks_like_yahoo_symbol(self, symbol: str) -> bool:
+        return bool(
+            re.search(r"(\.[A-Z]{1,4}|-[A-Z]{3,5}|=X)$", symbol)
+            or symbol.startswith("^")
+        )
+
+    def _market_from_suffix(self, symbol: str) -> str:
+        suffix = symbol.rsplit(".", 1)[-1] if "." in symbol else ""
+        return {
+            "KS": "korea_kospi",
+            "KQ": "korea_kosdaq",
+            "T": "japan",
+            "HK": "hong_kong",
+            "SS": "china_shanghai",
+            "SZ": "china_shenzhen",
+            "L": "united_kingdom",
+            "TO": "canada_tsx",
+            "V": "canada_tsxv",
+            "AX": "australia",
+            "NS": "india_nse",
+            "BO": "india_bse",
+            "DE": "germany",
+            "PA": "france",
+            "SI": "singapore",
+            "SA": "brazil",
+            "MX": "mexico",
+        }.get(suffix, "global")
+
+    def _instrument(self, requested: str, provider_ticker: str, market: str) -> MarketInstrument:
+        meta = {
+            "united_states": ("United States", "US", "USD", "SPY"),
+            "korea": ("South Korea", "KR", "KRW", "069500.KS"),
+            "korea_kospi": ("South Korea", "KOSPI", "KRW", "069500.KS"),
+            "korea_kosdaq": ("South Korea", "KOSDAQ", "KRW", "229200.KS"),
+            "japan": ("Japan", "TSE", "JPY", "1306.T"),
+            "hong_kong": ("Hong Kong", "HKEX", "HKD", "2800.HK"),
+            "china": ("China", "CN", "CNY", "510300.SS"),
+            "china_shanghai": ("China", "SSE", "CNY", "510300.SS"),
+            "china_shenzhen": ("China", "SZSE", "CNY", "159919.SZ"),
+            "united_kingdom": ("United Kingdom", "LSE", "GBp", "ISF.L"),
+            "canada": ("Canada", "TSX", "CAD", "XIU.TO"),
+            "canada_tsx": ("Canada", "TSX", "CAD", "XIU.TO"),
+            "canada_tsxv": ("Canada", "TSXV", "CAD", "XIU.TO"),
+            "australia": ("Australia", "ASX", "AUD", "STW.AX"),
+            "india_nse": ("India", "NSE", "INR", "NIFTYBEES.NS"),
+            "india_bse": ("India", "BSE", "INR", "NIFTYBEES.NS"),
+            "germany": ("Germany", "XETRA", "EUR", "EXS1.DE"),
+            "france": ("France", "Euronext Paris", "EUR", "EWQ"),
+            "singapore": ("Singapore", "SGX", "SGD", "ES3.SI"),
+            "brazil": ("Brazil", "B3", "BRL", "BOVA11.SA"),
+            "mexico": ("Mexico", "BMV", "MXN", "EWW"),
+            "global": ("Global", "GLOBAL", "", "ACWI"),
+            "unknown": ("", "", "", "SPY"),
+        }
+        country, exchange, currency, benchmark = meta.get(market, meta["unknown"])
+        return MarketInstrument(
+            requested_ticker=requested,
+            provider_ticker=provider_ticker,
+            market=market,
+            country=country,
+            exchange_hint=exchange,
+            currency_hint=currency,
+            benchmark_ticker=benchmark,
+        )
+
+    def _candidate_has_data(self, provider_ticker: str) -> bool:
+        try:
+            obj = yf.Ticker(provider_ticker)
+            info = obj.fast_info
+            price = None
+            try:
+                price = info.get("lastPrice")
+            except Exception:
+                price = None
+            if price and float(price) > 0:
+                return True
+            hist = obj.history(period="5d")
+            return hist is not None and not getattr(hist, "empty", True)
+        except Exception:
+            return False
+
     def _get_yfinance_latest_quote(self, ticker: str) -> PriceQuote | None:
         if yf is None:
             return None
-        normalized = str(ticker or "").upper().strip()
-        if not normalized:
+        instrument = self.resolve_instrument(ticker)
+        if not instrument:
             return None
+        normalized = instrument.provider_ticker
         try:
             ticker_obj = yf.Ticker(normalized)
             info = ticker_obj.info
@@ -106,13 +345,19 @@ class MarketDataProvider:
             return PriceQuote(
                 ticker=normalized,
                 price=float(px),
-                currency=str(info.get("currency") or info.get("financialCurrency") or ""),
+                currency=str(info.get("currency") or info.get("financialCurrency") or instrument.currency_hint or ""),
                 source="yfinance/Yahoo Finance",
                 quality="reference_not_execution_grade",
                 as_of=datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
                 detail={
+                    "requested_ticker": instrument.requested_ticker,
+                    "provider_ticker": instrument.provider_ticker,
+                    "market": instrument.market,
+                    "country": instrument.country,
+                    "exchange_hint": instrument.exchange_hint,
                     "market_state": info.get("marketState"),
                     "exchange": info.get("exchange"),
+                    "benchmark_ticker": instrument.benchmark_ticker,
                 },
             )
         except Exception:
@@ -127,9 +372,10 @@ class MarketDataProvider:
     def _get_yfinance_historical_quote(self, ticker: str, when: datetime) -> PriceQuote | None:
         if yf is None:
             return None
-        normalized = str(ticker or "").upper().strip()
-        if not normalized:
+        instrument = self.resolve_instrument(ticker)
+        if not instrument:
             return None
+        normalized = instrument.provider_ticker
         interval = "15m" if when.hour or when.minute else "1d"
         start = (when - timedelta(days=7)).strftime("%Y-%m-%d")
         end = (when + timedelta(days=7)).strftime("%Y-%m-%d")
@@ -163,10 +409,19 @@ class MarketDataProvider:
             return PriceQuote(
                 ticker=normalized,
                 price=float(close_value),
+                currency=instrument.currency_hint,
                 source="yfinance/Yahoo Finance",
                 quality="historical_reference_not_execution_grade",
                 as_of=chosen_ts.strftime('%Y-%m-%dT%H:%M:%S') if chosen_ts else "",
-                detail={"interval": interval},
+                detail={
+                    "requested_ticker": instrument.requested_ticker,
+                    "provider_ticker": instrument.provider_ticker,
+                    "market": instrument.market,
+                    "country": instrument.country,
+                    "exchange_hint": instrument.exchange_hint,
+                    "interval": interval,
+                    "benchmark_ticker": instrument.benchmark_ticker,
+                },
             )
         except Exception:
             return None

@@ -24,7 +24,7 @@ class LiveReadinessChecker:
         checks.append(self._check_reconciliation())
         checks.append(self._check_recent_data())
         if include_network:
-            checks.append(self._check_market_data(ticker))
+            checks.append(self._check_market_data_set(ticker))
         else:
             checks.append({"name": "market_data_network", "status": "skipped", "detail": {"reason": "include_network=false"}})
         failed = [c for c in checks if c.get("status") == "fail"]
@@ -71,8 +71,13 @@ class LiveReadinessChecker:
             missing.append("DISCORD_TOKEN")
         if not os.getenv("LOCAL_MODEL_NAME"):
             missing.append("LOCAL_MODEL_NAME")
+        warnings = []
+        if not os.getenv("DISCORD_OPERATOR_USER_IDS"):
+            warnings.append("DISCORD_OPERATOR_USER_IDS is empty; operator-only commands are not restricted")
         status = "warn" if missing else "ok"
-        return {"name": "env", "status": status, "detail": {"missing": missing}}
+        if warnings:
+            status = "warn"
+        return {"name": "env", "status": status, "detail": {"missing": missing, "warnings": warnings}}
 
     def _check_reconciliation(self) -> dict[str, Any]:
         report = PaperStateReconciler(self.db).run(persist=True)
@@ -103,6 +108,35 @@ class LiveReadinessChecker:
         if quality.get("state") == "missing":
             status = "fail"
         return {"name": "market_data", "status": status, "detail": quality}
+
+    def _check_market_data_set(self, ticker: str) -> dict[str, Any]:
+        tickers = self._readiness_tickers(ticker)
+        rows = []
+        for item in tickers:
+            quote = self.market_data.get_latest_quote(item)
+            quality = self.market_data.assess_quote_quality(quote, max_age_minutes=24 * 60)
+            rows.append(
+                {
+                    "requested_ticker": item,
+                    "provider_ticker": quote.ticker if quote else "",
+                    "market": (quote.detail or {}).get("market") if quote else "unknown",
+                    "state": quality.get("state"),
+                    "tradable": quality.get("tradable"),
+                    "reasons": quality.get("reasons", []),
+                    "price": quality.get("price", 0.0),
+                }
+            )
+        failed = [row for row in rows if row.get("state") == "missing"]
+        stale = [row for row in rows if row.get("state") == "stale"]
+        status = "fail" if failed else ("warn" if stale else "ok")
+        return {"name": "market_data", "status": status, "detail": {"tickers": rows}}
+
+    def _readiness_tickers(self, fallback_ticker: str) -> list[str]:
+        raw = os.getenv("READINESS_TICKERS", "")
+        values = [part.strip() for part in raw.split(",") if part.strip()]
+        if values:
+            return values
+        return [fallback_ticker] if fallback_ticker else ["SPY"]
 
 
 def main():

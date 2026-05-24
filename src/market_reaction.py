@@ -41,12 +41,15 @@ class MarketReactionAnalyzer:
             return []
         rows = []
         for ticker in tickers[:8]:
+            resolved_benchmark = benchmark_ticker
+            if benchmark_ticker == "SPY":
+                resolved_benchmark = self.market_data.benchmark_for_ticker(ticker)
             row = self.capture(
                 event_id=event.get("event_id", event_id),
                 event_key=event.get("event_key", ""),
                 ticker=ticker,
                 event_time=event_time,
-                benchmark_ticker=benchmark_ticker,
+                benchmark_ticker=resolved_benchmark,
             )
             rows.append(row)
             if persist:
@@ -64,6 +67,8 @@ class MarketReactionAnalyzer:
         sector_ticker: str = "",
     ) -> dict[str, Any]:
         ticker = str(ticker or "").upper().strip()
+        if benchmark_ticker == "SPY":
+            benchmark_ticker = self.market_data.benchmark_for_ticker(ticker)
         quotes = {
             key: self.market_data.get_historical_price(ticker, event_time + offset)
             for key, offset in self.WINDOWS.items()

@@ -136,6 +136,7 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 
 - Local LLM routing now supports per-profile model overrides such as `LOCAL_MODEL_NAME_EVIDENCE_VERDICT` and `LOCAL_MODEL_NAME_JUDGE`. Recommended production posture is hybrid: e4b for fast/high-volume helper work, 31B for evidence verdicts, judge-style arbitration, and long evidence summaries.
 - Market data currently works as reference data through yfinance/Yahoo Finance via `MarketDataProvider`. It is useful for paper execution, portfolio PnL, replay, and basic price context, but it is not yet execution-grade live quote/tick data.
+- Market data is now market-aware for common US, Korean, Japanese, Hong Kong, China, UK, Canada, Australia, India, and other Yahoo Finance suffix formats. See `MARKET_DATA_CONNECTIVITY_2026-05-24.md`; run `run_market_data_check.bat` to verify current connectivity.
 - For real investment use, news should be evaluated together with pre/post event price movement, volume, sector/benchmark relative return, and whether the move happened before the news reached public feeds. That market-reaction context is a next hardening priority.
 - Before sandbox/live trading, use `LIVE_TRADING_READINESS_2026-05-24.md` as the go/no-go checklist.
 - New local hardening jobs: `run_market_reaction.bat`, `run_reconciliation.bat`, and `run_live_readiness_check.bat`.

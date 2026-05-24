@@ -13,6 +13,7 @@ from data_fetcher.dart_official import DARTOfficialFetcher
 from data_fetcher.krx_kind_official import KRXKindOfficialChecker
 from data_fetcher.sec_official import SECOfficialFetcher
 from json_utils import parse_json_object
+from market_data_provider import MarketDataProvider
 
 class FactCheckAgent:
     def __init__(self, llm_manager):
@@ -26,6 +27,7 @@ class FactCheckAgent:
         self.dart_fetcher = DARTOfficialFetcher()
         self.krx_kind_checker = KRXKindOfficialChecker()
         self.sec_fetcher = SECOfficialFetcher()
+        self.market_data = MarketDataProvider()
         self.max_results = 5
         self.fetch_concurrency = max(1, int(os.getenv("WEB_FETCH_CONCURRENCY", "4")))
         self.fetch_timeout_sec = max(5, int(os.getenv("WEB_FETCH_TIMEOUT_SEC", "10")))
@@ -254,8 +256,10 @@ class FactCheckAgent:
         """공식 공시 데이터 우선 + yfinance 보조 시장 데이터를 가져옴."""
         official_text = await self._get_official_company_text(ticker)
         try:
+            instrument = self.market_data.resolve_instrument(ticker)
+            provider_ticker = instrument.provider_ticker if instrument else str(ticker or "").upper().strip()
             def fetch_data():
-                stock = yf.Ticker(ticker)
+                stock = yf.Ticker(provider_ticker)
                 return stock.info
             info = await asyncio.to_thread(fetch_data)
             

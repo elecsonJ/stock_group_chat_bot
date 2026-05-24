@@ -17,6 +17,7 @@ Safe current use:
 - Human-approved paper execution
 - Replay and performance feedback
 - Data quality evaluation
+- Market-aware reference price checks across common US/KR/JP/HK/CN/global Yahoo Finance formats
 
 Do not enable yet:
 
@@ -56,6 +57,8 @@ Minimum live gate:
 Current state:
 
 - `MarketDataProvider` uses yfinance/Yahoo Finance reference quotes and historical closes.
+- `MarketDataProvider` now resolves common market-specific ticker forms; see `MARKET_DATA_CONNECTIVITY_2026-05-24.md`.
+- `run_market_data_check.bat` verifies current cross-market connectivity and stores `market_data_connectivity_report_v1`.
 - This is acceptable for paper/replay/reference checks.
 - It is not execution-grade quote data.
 

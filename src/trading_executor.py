@@ -41,7 +41,9 @@ class TradingExecutor:
         if yf is None:
             return {}
         try:
-            hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
+            instrument = self.market_data.resolve_instrument(ticker)
+            provider_ticker = instrument.provider_ticker if instrument else str(ticker or "").upper().strip()
+            hist = yf.Ticker(provider_ticker).history(period="1mo", interval="1d")
             if getattr(hist, "empty", True) or len(hist) < 6:
                 return {}
             closes = hist["Close"].dropna().tolist()

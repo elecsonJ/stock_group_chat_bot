@@ -325,7 +325,13 @@ class DataQualityEvaluator:
         if not market_data_report:
             recs.append("run_market_data_check를 실행해 미국/한국/홍콩/일본 등 시장별 가격 조회 상태를 검증하세요.")
         elif str(market_data_report.get("overall_status") or "").lower() != "ok":
-            recs.append("market_data_connectivity_report_v1의 실패/경고 항목을 보고 종목별 provider_ticker나 시장 힌트를 보정하세요.")
+            problematic = [
+                f"{row.get('requested_ticker')}->{row.get('provider_ticker') or '-'}:{row.get('status')}"
+                for row in (market_data_report.get("checks", []) or [])
+                if str(row.get("status") or "").lower() != "ok"
+            ]
+            suffix = f" ({', '.join(problematic[:4])})" if problematic else ""
+            recs.append(f"market_data_connectivity_report_v1의 실패/경고 항목을 보고 종목별 provider_ticker나 시장 힌트를 보정하세요.{suffix}")
         if event_count > 0 and event_audit_count == 0:
             recs.append("이벤트 Intake 감사 로그가 없습니다. run_signals로 라우팅 이유를 남기세요.")
         if pack_count > 0 and context_audit_count == 0:

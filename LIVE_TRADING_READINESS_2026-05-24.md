@@ -18,6 +18,7 @@ Safe current use:
 - Replay and performance feedback
 - Data quality evaluation
 - Market-aware reference price checks across common US/KR/JP/HK/CN/global Yahoo Finance formats
+- Live-like daily operating sequence documented in `LIVE_OPERATIONS_PLAYBOOK_2026-05-24.md`
 
 Do not enable yet:
 
@@ -59,6 +60,7 @@ Current state:
 - `MarketDataProvider` uses yfinance/Yahoo Finance reference quotes and historical closes.
 - `MarketDataProvider` now resolves common market-specific ticker forms; see `MARKET_DATA_CONNECTIVITY_2026-05-24.md`.
 - `run_market_data_check.bat` verifies current cross-market connectivity and stores `market_data_connectivity_report_v1`.
+- `src/market_data_adapter.py` defines the adapter contract for a future broker/vendor execution-grade feed.
 - This is acceptable for paper/replay/reference checks.
 - It is not execution-grade quote data.
 

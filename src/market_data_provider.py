@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 try:
     import yfinance as yf
@@ -34,6 +35,9 @@ class MarketInstrument:
     exchange_hint: str = ""
     currency_hint: str = ""
     benchmark_ticker: str = "SPY"
+    timezone: str = "America/New_York"
+    regular_open: str = "09:30"
+    regular_close: str = "16:00"
 
 
 class MarketDataProvider:
@@ -94,6 +98,93 @@ class MarketDataProvider:
         if self.provider != "yfinance":
             return None
         return self._get_yfinance_historical_quote(ticker, when)
+
+    def get_history_frame(
+        self,
+        ticker: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        period: str | None = None,
+        interval: str = "1d",
+    ) -> Any:
+        if self.provider != "yfinance" or yf is None:
+            return None
+        instrument = self.resolve_instrument(ticker)
+        if not instrument:
+            return None
+        cache_start = start.strftime("%Y-%m-%dT%H:%M:%S") if start else ""
+        cache_end = end.strftime("%Y-%m-%dT%H:%M:%S") if end else ""
+        cache_key = (instrument.provider_ticker, interval, period or cache_start, cache_end)
+        if cache_key in self._history_cache:
+            return self._history_cache[cache_key]
+        try:
+            ticker_obj = yf.Ticker(instrument.provider_ticker)
+            if period:
+                frame = ticker_obj.history(period=period, interval=interval)
+            else:
+                kwargs: dict[str, Any] = {"interval": interval}
+                if start:
+                    kwargs["start"] = start.strftime("%Y-%m-%d")
+                if end:
+                    kwargs["end"] = end.strftime("%Y-%m-%d")
+                frame = ticker_obj.history(**kwargs)
+        except Exception:
+            frame = None
+        self._history_cache[cache_key] = frame
+        return frame
+
+    def session_state(self, ticker: str, when: datetime | None = None) -> dict[str, Any]:
+        instrument = self.resolve_instrument(ticker)
+        if not instrument:
+            return {"state": "unknown", "reason": "unresolved_ticker"}
+        now = when or datetime.now()
+        local_dt = self._to_market_time(now, instrument.timezone)
+        open_time = self._parse_hhmm(instrument.regular_open)
+        close_time = self._parse_hhmm(instrument.regular_close)
+        is_weekday = local_dt.weekday() < 5
+        in_regular = is_weekday and open_time <= local_dt.time() <= close_time
+        state = "regular" if in_regular else ("closed" if is_weekday else "weekend")
+        return {
+            "state": state,
+            "regular_session": in_regular,
+            "market": instrument.market,
+            "timezone": instrument.timezone,
+            "local_time": local_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+            "regular_open": instrument.regular_open,
+            "regular_close": instrument.regular_close,
+            "holiday_calendar": "not_implemented",
+        }
+
+    def sector_benchmark_for_ticker(self, ticker: str, info: dict[str, Any] | None = None) -> str:
+        instrument = self.resolve_instrument(ticker)
+        if not instrument:
+            return ""
+        if instrument.market == "united_states":
+            sector = str((info or {}).get("sector") or "").lower()
+            industry = str((info or {}).get("industry") or "").lower()
+            text = f"{sector} {industry}"
+            if "semiconductor" in text:
+                return "SOXX"
+            mapping = [
+                ("technology", "XLK"),
+                ("financial", "XLF"),
+                ("health", "XLV"),
+                ("energy", "XLE"),
+                ("consumer cyclical", "XLY"),
+                ("consumer defensive", "XLP"),
+                ("industrial", "XLI"),
+                ("utility", "XLU"),
+                ("real estate", "XLRE"),
+                ("communication", "XLC"),
+                ("basic material", "XLB"),
+            ]
+            for key, benchmark in mapping:
+                if key in text:
+                    return benchmark
+        if instrument.market in {"korea_kospi", "korea_kosdaq", "korea"}:
+            return os.getenv("KOREA_SECTOR_BENCHMARK_DEFAULT", "")
+        return ""
 
     def resolve_instrument(self, ticker: str) -> MarketInstrument | None:
         requested = str(ticker or "").strip()
@@ -269,31 +360,31 @@ class MarketDataProvider:
 
     def _instrument(self, requested: str, provider_ticker: str, market: str) -> MarketInstrument:
         meta = {
-            "united_states": ("United States", "US", "USD", "SPY"),
-            "korea": ("South Korea", "KR", "KRW", "069500.KS"),
-            "korea_kospi": ("South Korea", "KOSPI", "KRW", "069500.KS"),
-            "korea_kosdaq": ("South Korea", "KOSDAQ", "KRW", "229200.KS"),
-            "japan": ("Japan", "TSE", "JPY", "1306.T"),
-            "hong_kong": ("Hong Kong", "HKEX", "HKD", "2800.HK"),
-            "china": ("China", "CN", "CNY", "510300.SS"),
-            "china_shanghai": ("China", "SSE", "CNY", "510300.SS"),
-            "china_shenzhen": ("China", "SZSE", "CNY", "159919.SZ"),
-            "united_kingdom": ("United Kingdom", "LSE", "GBp", "ISF.L"),
-            "canada": ("Canada", "TSX", "CAD", "XIU.TO"),
-            "canada_tsx": ("Canada", "TSX", "CAD", "XIU.TO"),
-            "canada_tsxv": ("Canada", "TSXV", "CAD", "XIU.TO"),
-            "australia": ("Australia", "ASX", "AUD", "STW.AX"),
-            "india_nse": ("India", "NSE", "INR", "NIFTYBEES.NS"),
-            "india_bse": ("India", "BSE", "INR", "NIFTYBEES.NS"),
-            "germany": ("Germany", "XETRA", "EUR", "EXS1.DE"),
-            "france": ("France", "Euronext Paris", "EUR", "EWQ"),
-            "singapore": ("Singapore", "SGX", "SGD", "ES3.SI"),
-            "brazil": ("Brazil", "B3", "BRL", "BOVA11.SA"),
-            "mexico": ("Mexico", "BMV", "MXN", "EWW"),
-            "global": ("Global", "GLOBAL", "", "ACWI"),
-            "unknown": ("", "", "", "SPY"),
+            "united_states": ("United States", "US", "USD", "SPY", "America/New_York", "09:30", "16:00"),
+            "korea": ("South Korea", "KR", "KRW", "069500.KS", "Asia/Seoul", "09:00", "15:30"),
+            "korea_kospi": ("South Korea", "KOSPI", "KRW", "069500.KS", "Asia/Seoul", "09:00", "15:30"),
+            "korea_kosdaq": ("South Korea", "KOSDAQ", "KRW", "229200.KS", "Asia/Seoul", "09:00", "15:30"),
+            "japan": ("Japan", "TSE", "JPY", "1306.T", "Asia/Tokyo", "09:00", "15:30"),
+            "hong_kong": ("Hong Kong", "HKEX", "HKD", "2800.HK", "Asia/Hong_Kong", "09:30", "16:00"),
+            "china": ("China", "CN", "CNY", "510300.SS", "Asia/Shanghai", "09:30", "15:00"),
+            "china_shanghai": ("China", "SSE", "CNY", "510300.SS", "Asia/Shanghai", "09:30", "15:00"),
+            "china_shenzhen": ("China", "SZSE", "CNY", "159919.SZ", "Asia/Shanghai", "09:30", "15:00"),
+            "united_kingdom": ("United Kingdom", "LSE", "GBp", "ISF.L", "Europe/London", "08:00", "16:30"),
+            "canada": ("Canada", "TSX", "CAD", "XIU.TO", "America/Toronto", "09:30", "16:00"),
+            "canada_tsx": ("Canada", "TSX", "CAD", "XIU.TO", "America/Toronto", "09:30", "16:00"),
+            "canada_tsxv": ("Canada", "TSXV", "CAD", "XIU.TO", "America/Toronto", "09:30", "16:00"),
+            "australia": ("Australia", "ASX", "AUD", "STW.AX", "Australia/Sydney", "10:00", "16:00"),
+            "india_nse": ("India", "NSE", "INR", "NIFTYBEES.NS", "Asia/Kolkata", "09:15", "15:30"),
+            "india_bse": ("India", "BSE", "INR", "NIFTYBEES.NS", "Asia/Kolkata", "09:15", "15:30"),
+            "germany": ("Germany", "XETRA", "EUR", "EXS1.DE", "Europe/Berlin", "09:00", "17:30"),
+            "france": ("France", "Euronext Paris", "EUR", "EWQ", "Europe/Paris", "09:00", "17:30"),
+            "singapore": ("Singapore", "SGX", "SGD", "ES3.SI", "Asia/Singapore", "09:00", "17:00"),
+            "brazil": ("Brazil", "B3", "BRL", "BOVA11.SA", "America/Sao_Paulo", "10:00", "17:00"),
+            "mexico": ("Mexico", "BMV", "MXN", "EWW", "America/Mexico_City", "08:30", "15:00"),
+            "global": ("Global", "GLOBAL", "", "ACWI", "UTC", "00:00", "23:59"),
+            "unknown": ("", "", "", "SPY", "America/New_York", "09:30", "16:00"),
         }
-        country, exchange, currency, benchmark = meta.get(market, meta["unknown"])
+        country, exchange, currency, benchmark, timezone, regular_open, regular_close = meta.get(market, meta["unknown"])
         return MarketInstrument(
             requested_ticker=requested,
             provider_ticker=provider_ticker,
@@ -302,6 +393,9 @@ class MarketDataProvider:
             exchange_hint=exchange,
             currency_hint=currency,
             benchmark_ticker=benchmark,
+            timezone=timezone,
+            regular_open=regular_open,
+            regular_close=regular_close,
         )
 
     def _candidate_has_data(self, provider_ticker: str) -> bool:
@@ -358,6 +452,7 @@ class MarketDataProvider:
                     "market_state": info.get("marketState"),
                     "exchange": info.get("exchange"),
                     "benchmark_ticker": instrument.benchmark_ticker,
+                    "session": self.session_state(normalized),
                 },
             )
         except Exception:
@@ -383,7 +478,7 @@ class MarketDataProvider:
         frame = self._history_cache.get(cache_key)
         if frame is None:
             try:
-                frame = yf.Ticker(normalized).history(start=start, end=end, interval=interval)
+                frame = self.get_history_frame(normalized, start=when - timedelta(days=7), end=when + timedelta(days=7), interval=interval)
             except Exception:
                 frame = None
             self._history_cache[cache_key] = frame
@@ -421,7 +516,24 @@ class MarketDataProvider:
                     "exchange_hint": instrument.exchange_hint,
                     "interval": interval,
                     "benchmark_ticker": instrument.benchmark_ticker,
+                    "session": self.session_state(normalized, chosen_ts or when),
                 },
             )
         except Exception:
             return None
+
+    def _to_market_time(self, value: datetime, timezone: str) -> datetime:
+        try:
+            zone = ZoneInfo(timezone)
+            if value.tzinfo is None:
+                local_zone = datetime.now().astimezone().tzinfo
+                value = value.replace(tzinfo=local_zone)
+            return value.astimezone(zone).replace(tzinfo=None)
+        except Exception:
+            return value.replace(tzinfo=None)
+
+    def _parse_hhmm(self, value: str):
+        try:
+            return datetime.strptime(value, "%H:%M").time()
+        except Exception:
+            return datetime.strptime("09:30", "%H:%M").time()

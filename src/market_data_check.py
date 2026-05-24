@@ -65,6 +65,8 @@ class MarketDataConnectivityCheck:
             "country": (quote.detail or {}).get("country") if quote else (instrument.country if instrument else ""),
             "exchange_hint": (quote.detail or {}).get("exchange_hint") if quote else (instrument.exchange_hint if instrument else ""),
             "benchmark_ticker": (quote.detail or {}).get("benchmark_ticker") if quote else (instrument.benchmark_ticker if instrument else ""),
+            "session": (quote.detail or {}).get("session") if quote else self.market_data.session_state(ticker),
+            "execution_grade": False,
             "reasons": quality.get("reasons", []),
         }
         return {

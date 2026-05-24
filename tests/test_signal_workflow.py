@@ -212,6 +212,50 @@ class SignalWorkflowTests(unittest.TestCase):
         self.assertEqual(event["verification_json"]["verdict"], "insufficient")
         self.assertTrue(event["verification_json"]["limitations"])
 
+    def test_market_reaction_adjustment_changes_signal_score(self):
+        engine = SignalEngine(self.db)
+        event_id = "SG-MR-ADJ"
+        self.db.save_market_reaction_snapshot(
+            {
+                "event_id": event_id,
+                "event_key": "EVT-MR-ADJ",
+                "ticker": "NVDA",
+                "event_time": "2026-05-24T10:00:00",
+                "captured_at": "2026-05-24T11:00:00",
+                "benchmark_ticker": "SPY",
+                "sector_ticker": "SOXX",
+                "pre_60m_price": 100.0,
+                "pre_30m_price": 100.0,
+                "pre_5m_price": 100.5,
+                "event_price": 101.0,
+                "post_5m_price": 102.0,
+                "post_30m_price": 103.0,
+                "post_60m_price": 104.5,
+                "post_1d_price": 105.0,
+                "pre_news_move_pct": 0.5,
+                "post_60m_move_pct": 3.5,
+                "post_1d_move_pct": 4.0,
+                "benchmark_post_60m_pct": 0.2,
+                "relative_post_60m_pct": 3.3,
+                "volume_zscore": 2.5,
+                "already_priced_in": False,
+                "market_data_quality": "reference",
+                "detail_json": {},
+            }
+        )
+
+        adjusted = engine._apply_market_reaction_adjustment(
+            event_id,
+            {
+                "score_total": 70.0,
+                "direction": "bullish",
+                "score_json": {},
+            },
+        )
+
+        self.assertGreater(adjusted["score_total"], 70.0)
+        self.assertIn("market_reaction_adjustments", adjusted["score_json"])
+
 
 if __name__ == "__main__":
     unittest.main()

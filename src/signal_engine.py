@@ -28,6 +28,7 @@ class SignalEngine:
         self.debate_review_min_score = max(50.0, float(os.getenv("DEBATE_REVIEW_MIN_SCORE", "70")))
         self.debate_require_verified = os.getenv("DEBATE_REQUIRE_VERIFIED", "true").strip().lower() not in {"0", "false", "no"}
         self.capture_market_reaction = os.getenv("SIGNAL_CAPTURE_MARKET_REACTION", "false").strip().lower() in {"1", "true", "yes"}
+        self.market_reaction_scoring = os.getenv("SIGNAL_MARKET_REACTION_SCORING", "true").strip().lower() not in {"0", "false", "no"}
         self.review_trigger_min_score = max(40.0, float(os.getenv("REVIEW_TRIGGER_MIN_SCORE", "70")))
         self.high_quality_source_tiers = {"regulatory", "company_ir", "tier1_media"}
         try:
@@ -767,6 +768,34 @@ class SignalEngine:
             )
         return recs
 
+    def _apply_market_reaction_adjustment(self, event_id: str, eval_data: dict[str, Any]) -> dict[str, Any]:
+        if not self.market_reaction_scoring:
+            return eval_data
+        snapshots = self.db.list_market_reaction_snapshots(event_id=event_id, limit=5)
+        if not snapshots:
+            return eval_data
+        analyzer = MarketReactionAnalyzer(self.db)
+        direction = str(eval_data.get("direction") or "neutral")
+        adjustments = []
+        total_delta = 0.0
+        confidence_delta = 0.0
+        for row in snapshots[:3]:
+            adj = analyzer.score_adjustment(row, direction=direction)
+            adjustments.append({**adj, "ticker": row.get("ticker"), "snapshot_quality": row.get("market_data_quality")})
+            total_delta += float(adj.get("score_delta", 0.0) or 0.0)
+            confidence_delta += float(adj.get("confidence_delta", 0.0) or 0.0)
+        total_delta = max(-15.0, min(12.0, total_delta))
+        if abs(total_delta) < 0.01 and abs(confidence_delta) < 0.001:
+            return eval_data
+        updated = dict(eval_data)
+        score_json = dict(updated.get("score_json", {}) or {})
+        score_json["market_reaction_adjustments"] = adjustments
+        score_json["market_reaction_score_delta"] = round(total_delta, 2)
+        score_json["market_reaction_confidence_delta"] = round(confidence_delta, 3)
+        updated["score_json"] = score_json
+        updated["score_total"] = max(0.0, min(100.0, round(float(updated.get("score_total", 0.0) or 0.0) + total_delta, 2)))
+        return updated
+
     async def generate_signals_from_news(
         self,
         portfolio_tickers: list[str],
@@ -829,6 +858,8 @@ class SignalEngine:
             v_dir = str((verification or {}).get("direction", "")).strip().lower()
             if v_dir in {"bullish", "bearish"}:
                 eval_data["direction"] = v_dir
+            eval_data = self._apply_market_reaction_adjustment(event_id, eval_data)
+            score_total = float(eval_data.get("score_total", score_total) or score_total)
             ontology_plan = self._build_ontology_plan(e)
 
             recs = []

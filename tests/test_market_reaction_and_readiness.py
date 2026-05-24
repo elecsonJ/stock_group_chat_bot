@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
+import pandas as pd
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
@@ -40,6 +42,14 @@ class FakeMarketData:
 
     def benchmark_for_ticker(self, ticker):
         return "SPY"
+
+    def sector_benchmark_for_ticker(self, ticker):
+        return "SOXX" if ticker == "NVDA" else ""
+
+    def get_history_frame(self, ticker, start=None, end=None, period=None, interval="1d"):
+        dates = pd.date_range("2026-03-01", periods=65, freq="D")
+        volumes = [1000.0 + (i % 5) * 10.0 for i in range(64)] + [5000.0]
+        return pd.DataFrame({"Volume": volumes, "Close": [100.0] * 65}, index=dates)
 
 
 class MarketReactionAndReadinessTests(unittest.TestCase):
@@ -81,6 +91,9 @@ class MarketReactionAndReadinessTests(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertAlmostEqual(saved[0]["post_60m_move_pct"], 3.0, places=2)
         self.assertGreater(saved[0]["relative_post_60m_pct"], 2.0)
+        self.assertEqual(saved[0]["sector_ticker"], "SOXX")
+        self.assertGreater(saved[0]["volume_zscore"], 0.0)
+        self.assertIn("reaction_score_adjustments", saved[0]["detail_json"])
 
     def test_reconciliation_detects_equity_mismatch_and_readiness_warns(self):
         self.db.update_paper_account_state({"cash_balance": 1000.0, "equity": 9999.0, "buying_power": 1000.0})

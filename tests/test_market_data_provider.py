@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
@@ -55,6 +56,17 @@ class MarketDataProviderResolutionTests(unittest.TestCase):
 
         self.assertEqual(provider.resolve_instrument("NVDA").provider_ticker, "NVDA")
         self.assertEqual(provider.resolve_instrument("005930.KS").provider_ticker, "005930.KS")
+
+    def test_market_session_and_sector_benchmark_metadata(self):
+        provider = FakeResolvingMarketDataProvider({"NVDA", "005930.KS"})
+
+        us_session = provider.session_state("NVDA", datetime(2026, 5, 22, 14, 0, 0))
+        kr_session = provider.session_state("005930", datetime(2026, 5, 22, 10, 0, 0))
+
+        self.assertEqual(us_session["market"], "united_states")
+        self.assertIn(us_session["state"], {"regular", "closed"})
+        self.assertEqual(kr_session["timezone"], "Asia/Seoul")
+        self.assertEqual(provider.sector_benchmark_for_ticker("NVDA", {"sector": "Technology", "industry": "Semiconductors"}), "SOXX")
 
 
 if __name__ == "__main__":

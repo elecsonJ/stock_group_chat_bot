@@ -124,6 +124,8 @@ class LiveReadinessChecker:
                     "tradable": quality.get("tradable"),
                     "reasons": quality.get("reasons", []),
                     "price": quality.get("price", 0.0),
+                    "session": (quote.detail or {}).get("session") if quote else self.market_data.session_state(item),
+                    "execution_grade": False,
                 }
             )
         failed = [row for row in rows if row.get("state") == "missing"]

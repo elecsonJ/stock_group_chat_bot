@@ -69,6 +69,13 @@ class MarketReactionAnalyzer:
         ticker = str(ticker or "").upper().strip()
         if benchmark_ticker == "SPY":
             benchmark_ticker = self.market_data.benchmark_for_ticker(ticker)
+        if not sector_ticker:
+            sector_fn = getattr(self.market_data, "sector_benchmark_for_ticker", None)
+            if callable(sector_fn):
+                try:
+                    sector_ticker = str(sector_fn(ticker) or "")
+                except Exception:
+                    sector_ticker = ""
         quotes = {
             key: self.market_data.get_historical_price(ticker, event_time + offset)
             for key, offset in self.WINDOWS.items()
@@ -77,6 +84,12 @@ class MarketReactionAnalyzer:
             key: self.market_data.get_historical_price(benchmark_ticker, event_time + offset)
             for key, offset in {"event": timedelta(minutes=0), "post_60m": timedelta(minutes=60)}.items()
         }
+        sector_quotes = {}
+        if sector_ticker:
+            sector_quotes = {
+                key: self.market_data.get_historical_price(sector_ticker, event_time + offset)
+                for key, offset in {"event": timedelta(minutes=0), "post_60m": timedelta(minutes=60)}.items()
+            }
 
         def price(key: str) -> float:
             q = quotes.get(key)
@@ -94,9 +107,15 @@ class MarketReactionAnalyzer:
             self._quote_price(benchmark_quotes.get("event")),
             self._quote_price(benchmark_quotes.get("post_60m")),
         )
+        sector_post_60 = self._return_pct(
+            self._quote_price(sector_quotes.get("event")),
+            self._quote_price(sector_quotes.get("post_60m")),
+        ) if sector_quotes else 0.0
         relative_post_60 = post_60_move - benchmark_post_60
+        relative_sector_post_60 = post_60_move - sector_post_60
         missing = [key for key, quote in quotes.items() if quote is None]
         quality = self._quality_state(missing, quotes)
+        volume_zscore = self._volume_zscore(ticker, event_time)
         already_priced = abs(pre_news_move) >= 2.0 and abs(post_60_move) < abs(pre_news_move) * 0.35
 
         return {
@@ -120,14 +139,71 @@ class MarketReactionAnalyzer:
             "post_1d_move_pct": round(post_1d_move, 4),
             "benchmark_post_60m_pct": round(benchmark_post_60, 4),
             "relative_post_60m_pct": round(relative_post_60, 4),
-            "volume_zscore": 0.0,
+            "volume_zscore": round(volume_zscore, 4),
             "already_priced_in": already_priced,
             "market_data_quality": quality,
             "detail_json": {
                 "missing_windows": missing,
                 "quote_as_of": {key: quote.as_of for key, quote in quotes.items() if quote},
                 "benchmark_missing": [key for key, quote in benchmark_quotes.items() if quote is None],
+                "sector_post_60m_pct": round(sector_post_60, 4),
+                "relative_sector_post_60m_pct": round(relative_sector_post_60, 4),
+                "sector_missing": [key for key, quote in sector_quotes.items() if quote is None],
+                "reaction_score_adjustments": self.score_adjustment(
+                    {
+                        "pre_news_move_pct": pre_news_move,
+                        "post_60m_move_pct": post_60_move,
+                        "relative_post_60m_pct": relative_post_60,
+                        "volume_zscore": volume_zscore,
+                        "already_priced_in": already_priced,
+                        "market_data_quality": quality,
+                    }
+                ),
             },
+        }
+
+    def score_adjustment(self, row: dict[str, Any], direction: str = "neutral") -> dict[str, Any]:
+        quality = str(row.get("market_data_quality") or "").lower()
+        if quality in {"missing", "partial"}:
+            return {"score_delta": 0.0, "confidence_delta": -0.05, "reason": "market_reaction_incomplete"}
+        pre_move = float(row.get("pre_news_move_pct", 0.0) or 0.0)
+        post_move = float(row.get("post_60m_move_pct", 0.0) or 0.0)
+        relative_move = float(row.get("relative_post_60m_pct", 0.0) or 0.0)
+        volume_z = float(row.get("volume_zscore", 0.0) or 0.0)
+        already_priced = bool(row.get("already_priced_in", False))
+        direction = str(direction or "neutral").lower()
+
+        directional_move = relative_move
+        if direction == "bearish":
+            directional_move = -relative_move
+        elif direction == "neutral":
+            directional_move = abs(relative_move) * 0.35
+
+        score_delta = 0.0
+        reasons = []
+        if already_priced:
+            score_delta -= 10.0
+            reasons.append("pre_news_move_suggests_already_priced")
+        if directional_move >= 1.0:
+            score_delta += min(8.0, directional_move * 2.0)
+            reasons.append("post_news_move_confirms_direction")
+        elif directional_move <= -1.0:
+            score_delta += max(-8.0, directional_move * 2.0)
+            reasons.append("post_news_move_contradicts_direction")
+        if volume_z >= 2.0:
+            score_delta += 4.0
+            reasons.append("abnormal_volume_confirmation")
+        elif 0 < volume_z < 0.5 and abs(post_move) >= 1.5:
+            score_delta -= 2.0
+            reasons.append("price_move_without_volume_confirmation")
+        if abs(pre_move) >= 4.0 and abs(post_move) < 1.0:
+            score_delta -= 4.0
+            reasons.append("reaction_mostly_before_detection")
+
+        return {
+            "score_delta": round(max(-15.0, min(12.0, score_delta)), 2),
+            "confidence_delta": 0.03 if score_delta > 3 else (-0.04 if score_delta < -3 else 0.0),
+            "reason": ",".join(reasons) or "market_reaction_neutral",
         }
 
     def _parse_event_time(self, event: dict[str, Any]) -> datetime | None:
@@ -151,6 +227,39 @@ class MarketReactionAnalyzer:
 
     def _quote_price(self, quote: PriceQuote | None) -> float:
         return float(quote.price) if quote else 0.0
+
+    def _volume_zscore(self, ticker: str, event_time: datetime) -> float:
+        history_fn = getattr(self.market_data, "get_history_frame", None)
+        if not callable(history_fn):
+            return 0.0
+        try:
+            frame = history_fn(
+                ticker,
+                start=event_time - timedelta(days=90),
+                end=event_time + timedelta(days=2),
+                interval="1d",
+            )
+        except Exception:
+            return 0.0
+        if frame is None or getattr(frame, "empty", True) or "Volume" not in getattr(frame, "columns", []):
+            return 0.0
+        try:
+            indexed = frame.sort_index()
+            volumes = [float(v or 0.0) for v in indexed["Volume"].dropna().tolist() if float(v or 0.0) > 0]
+            if len(volumes) < 20:
+                return 0.0
+            event_volume = volumes[-1]
+            baseline = volumes[-61:-1] if len(volumes) >= 61 else volumes[:-1]
+            if len(baseline) < 10:
+                return 0.0
+            mean = sum(baseline) / len(baseline)
+            variance = sum((v - mean) ** 2 for v in baseline) / len(baseline)
+            std = variance ** 0.5
+            if std <= 0:
+                return 0.0
+            return (event_volume - mean) / std
+        except Exception:
+            return 0.0
 
     def _quality_state(self, missing: list[str], quotes: dict[str, PriceQuote | None]) -> str:
         if not quotes or len(missing) == len(quotes):

@@ -19,6 +19,7 @@ Safe current use:
 - Data quality evaluation
 - Market-aware reference price checks across common US/KR/JP/HK/CN/global Yahoo Finance formats
 - Live-like daily operating sequence documented in `LIVE_OPERATIONS_PLAYBOOK_2026-05-24.md`
+- User-required external integrations documented in `USER_REQUIRED_INTEGRATIONS_2026-05-24.md`
 
 Do not enable yet:
 

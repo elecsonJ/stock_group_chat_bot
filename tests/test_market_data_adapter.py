@@ -8,7 +8,7 @@ SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.append(SRC_DIR)
 
-from market_data_adapter import HistoricalPriceRequest, QuoteRequest, YFinanceReferenceAdapter
+from market_data_adapter import HistoricalPriceRequest, QuoteRequest, YFinanceReferenceAdapter, create_market_data_adapter
 from market_data_provider import PriceQuote
 
 
@@ -42,6 +42,13 @@ class MarketDataAdapterTests(unittest.TestCase):
 
         self.assertEqual(quote.ticker, "KR:005930")
         self.assertEqual(hist.ticker, "JP:7203")
+
+    def test_factory_returns_unconfigured_adapter_for_live_feed(self):
+        adapter = create_market_data_adapter("execution_grade", FakeProvider())
+
+        self.assertFalse(adapter.capabilities().execution_grade)
+        self.assertIsNone(adapter.get_latest_quote(QuoteRequest("NVDA", require_execution_grade=True)))
+        self.assertEqual(adapter.assess_quote_quality(None)["state"], "missing")
 
 
 if __name__ == "__main__":

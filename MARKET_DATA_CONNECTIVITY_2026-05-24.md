@@ -132,3 +132,5 @@ For real money, this still needs a broker or market-data vendor layer that can p
 The current layer is appropriate as a resilient reference provider, not as the final source of truth for order placement.
 
 The adapter interface for a future broker/vendor feed is in `src/market_data_adapter.py`. A live adapter should implement bid/ask, halt status, exchange calendar, and execution-grade freshness semantics before automatic live orders are enabled.
+
+Exchange calendar support uses `pandas-market-calendars` when installed and falls back to market timezone plus weekday/session hours if unavailable. The fallback is useful for development, but live trading should rely on the installed calendar package or the broker/vendor calendar.

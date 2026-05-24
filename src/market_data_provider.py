@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover
     yf = None
 
 from yfinance_runtime import configure_yfinance_cache
+from exchange_calendar import ExchangeCalendarService
 
 
 @dataclass
@@ -52,6 +53,7 @@ class MarketDataProvider:
         self.provider = os.getenv("MARKET_DATA_PROVIDER", "yfinance").strip().lower()
         self._history_cache: dict[tuple[str, str, str, str], Any] = {}
         self._resolution_cache: dict[str, MarketInstrument | None] = {}
+        self.calendar = ExchangeCalendarService()
         configure_yfinance_cache(yf)
 
     def get_latest_quote(self, ticker: str) -> PriceQuote | None:
@@ -92,6 +94,8 @@ class MarketDataProvider:
             "quality": quote.quality,
             "as_of": quote.as_of,
             "price": quote.price,
+            "execution_grade": bool(detail.get("execution_grade", False)),
+            "session": detail.get("session", {}),
         }
 
     def get_historical_price(self, ticker: str, when: datetime) -> PriceQuote | None:
@@ -140,20 +144,20 @@ class MarketDataProvider:
             return {"state": "unknown", "reason": "unresolved_ticker"}
         now = when or datetime.now()
         local_dt = self._to_market_time(now, instrument.timezone)
-        open_time = self._parse_hhmm(instrument.regular_open)
-        close_time = self._parse_hhmm(instrument.regular_close)
-        is_weekday = local_dt.weekday() < 5
-        in_regular = is_weekday and open_time <= local_dt.time() <= close_time
-        state = "regular" if in_regular else ("closed" if is_weekday else "weekend")
+        session = self.calendar.session_state(instrument, when=now)
         return {
-            "state": state,
-            "regular_session": in_regular,
+            "state": session.state,
+            "regular_session": session.regular_session,
             "market": instrument.market,
             "timezone": instrument.timezone,
-            "local_time": local_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+            "local_time": session.local_time or local_dt.strftime("%Y-%m-%dT%H:%M:%S"),
             "regular_open": instrument.regular_open,
             "regular_close": instrument.regular_close,
-            "holiday_calendar": "not_implemented",
+            "holiday_calendar": session.calendar_source,
+            "calendar_name": session.calendar_name,
+            "session_reason": session.reason,
+            "open_at": session.open_at,
+            "close_at": session.close_at,
         }
 
     def sector_benchmark_for_ticker(self, ticker: str, info: dict[str, Any] | None = None) -> str:
@@ -453,6 +457,7 @@ class MarketDataProvider:
                     "exchange": info.get("exchange"),
                     "benchmark_ticker": instrument.benchmark_ticker,
                     "session": self.session_state(normalized),
+                    "execution_grade": False,
                 },
             )
         except Exception:
@@ -517,6 +522,7 @@ class MarketDataProvider:
                     "interval": interval,
                     "benchmark_ticker": instrument.benchmark_ticker,
                     "session": self.session_state(normalized, chosen_ts or when),
+                    "execution_grade": False,
                 },
             )
         except Exception:

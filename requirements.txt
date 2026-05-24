@@ -3,6 +3,7 @@ openai
 anthropic
 google-genai
 yfinance
+pandas-market-calendars
 feedparser
 python-dotenv
 beautifulsoup4

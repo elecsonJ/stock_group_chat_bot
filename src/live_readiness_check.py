@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from db_manager import DBManager
+from market_data_adapter import create_market_data_adapter
 from market_data_provider import MarketDataProvider
 from reconciliation import PaperStateReconciler
 
@@ -21,6 +22,7 @@ class LiveReadinessChecker:
         checks.append(self._check_db())
         checks.append(self._check_guardrail())
         checks.append(self._check_env())
+        checks.append(self._check_market_data_adapter())
         checks.append(self._check_reconciliation())
         checks.append(self._check_recent_data())
         if include_network:
@@ -78,6 +80,25 @@ class LiveReadinessChecker:
         if warnings:
             status = "warn"
         return {"name": "env", "status": status, "detail": {"missing": missing, "warnings": warnings}}
+
+    def _check_market_data_adapter(self) -> dict[str, Any]:
+        adapter = create_market_data_adapter(provider=self.market_data)
+        caps = adapter.capabilities()
+        require_execution_grade = os.getenv("REQUIRE_EXECUTION_GRADE_MARKET_DATA", "false").strip().lower() in {"1", "true", "yes"}
+        detail = {
+            "provider_name": caps.provider_name,
+            "execution_grade": caps.execution_grade,
+            "supports_realtime_bid_ask": caps.supports_realtime_bid_ask,
+            "supports_halts": caps.supports_halts,
+            "supports_exchange_calendar": caps.supports_exchange_calendar,
+            "notes": caps.notes,
+            "required": require_execution_grade,
+        }
+        if require_execution_grade and not caps.execution_grade:
+            return {"name": "market_data_adapter", "status": "fail", "detail": detail}
+        if not caps.execution_grade:
+            return {"name": "market_data_adapter", "status": "warn", "detail": detail}
+        return {"name": "market_data_adapter", "status": "ok", "detail": detail}
 
     def _check_reconciliation(self) -> dict[str, Any]:
         report = PaperStateReconciler(self.db).run(persist=True)

@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from db_manager import DBManager
+from market_data_adapter import create_market_data_adapter
 from market_data_provider import MarketDataProvider
 
 
@@ -21,6 +22,7 @@ class MarketDataConnectivityCheck:
     def run(self, tickers: list[str] | None = None) -> dict[str, Any]:
         requested = tickers or self._env_tickers() or DEFAULT_TICKERS
         rows = [self._check_one(ticker) for ticker in requested]
+        adapter_caps = create_market_data_adapter(provider=self.market_data).capabilities()
         missing = [row for row in rows if row.get("status") == "fail"]
         warn = [row for row in rows if row.get("status") == "warn"]
         overall = "fail" if missing else ("warn" if warn else "ok")
@@ -28,6 +30,12 @@ class MarketDataConnectivityCheck:
             "schema_version": "market_data_connectivity.v1",
             "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "provider": self.market_data.provider,
+            "adapter": {
+                "provider_name": adapter_caps.provider_name,
+                "execution_grade": adapter_caps.execution_grade,
+                "supports_realtime_bid_ask": adapter_caps.supports_realtime_bid_ask,
+                "supports_exchange_calendar": adapter_caps.supports_exchange_calendar,
+            },
             "overall_status": overall,
             "checks": rows,
         }

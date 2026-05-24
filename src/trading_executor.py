@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 
 try:
@@ -22,6 +23,7 @@ class TradingExecutor:
         self.broker = PaperBroker(self.db)
         self.risk_manager = RiskManager(self.db)
         self.market_data = MarketDataProvider()
+        self.require_execution_grade_market_data = os.getenv("PAPER_REQUIRE_EXECUTION_GRADE_MARKET_DATA", "false").strip().lower() in {"1", "true", "yes"}
         configure_yfinance_cache(yf)
 
     def _fetch_price(self, ticker: str) -> float:
@@ -108,6 +110,8 @@ class TradingExecutor:
                 return False, f"❌ 가격 조회 실패로 실행 중단: `{ticker}`"
             if str(quality.get("state", "")).lower() in {"missing", "stale"}:
                 return False, f"market data quality gate failed: `{ticker}` ({quality})"
+            if self.require_execution_grade_market_data and not quality.get("execution_grade", False):
+                return False, f"execution-grade market data required but unavailable: `{ticker}` ({quality})"
             prices[ticker] = px
             market_contexts[ticker] = self._fetch_market_context(ticker)
 

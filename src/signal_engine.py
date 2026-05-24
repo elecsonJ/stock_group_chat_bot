@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from db_manager import DBManager
+from market_reaction import MarketReactionAnalyzer
 from ontology import HybridResearchPlanner, OntologyStore
 
 
@@ -26,6 +27,7 @@ class SignalEngine:
         self.debate_frontier_mode = os.getenv("DEBATE_FRONTIER_MODE", "gated").strip().lower()
         self.debate_review_min_score = max(50.0, float(os.getenv("DEBATE_REVIEW_MIN_SCORE", "70")))
         self.debate_require_verified = os.getenv("DEBATE_REQUIRE_VERIFIED", "true").strip().lower() not in {"0", "false", "no"}
+        self.capture_market_reaction = os.getenv("SIGNAL_CAPTURE_MARKET_REACTION", "false").strip().lower() in {"1", "true", "yes"}
         self.review_trigger_min_score = max(40.0, float(os.getenv("REVIEW_TRIGGER_MIN_SCORE", "70")))
         self.high_quality_source_tiers = {"regulatory", "company_ir", "tier1_media"}
         try:
@@ -858,6 +860,11 @@ class SignalEngine:
                 "last_verified_at": (verification or {}).get("verified_at"),
             }
             self.db.upsert_signal_event(signal_row)
+            if self.capture_market_reaction:
+                try:
+                    MarketReactionAnalyzer(self.db).capture_for_signal_event(event_id, persist=True)
+                except Exception:
+                    pass
 
             if recs and not is_terminal_event:
                 self.db.replace_recommendations(event_id, recs)

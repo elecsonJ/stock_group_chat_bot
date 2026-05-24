@@ -18,6 +18,14 @@ class BrokerAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_open_orders(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_fills(self, limit: int = 100) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def refresh_market_prices(self, price_map: dict[str, float]) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -34,4 +42,8 @@ class BrokerAdapter(ABC):
         notes: str = "",
         detail_json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cancel_order(self, client_order_id: str) -> dict[str, Any]:
         raise NotImplementedError

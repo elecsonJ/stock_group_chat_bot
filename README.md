@@ -140,3 +140,4 @@ Discord-based multi-LLM (ChatGPT, Claude, Gemini, Local) group chat platform for
 - Before sandbox/live trading, use `LIVE_TRADING_READINESS_2026-05-24.md` as the go/no-go checklist.
 - New local hardening jobs: `run_market_reaction.bat`, `run_reconciliation.bat`, and `run_live_readiness_check.bat`.
 - Set `DISCORD_OPERATOR_USER_IDS` to restrict approval, debate queue mutation, and kill-switch commands to specific Discord user IDs.
+- `SIGNAL_CAPTURE_MARKET_REACTION=true` can capture market reaction snapshots during signal generation; leave it off for faster routine runs.

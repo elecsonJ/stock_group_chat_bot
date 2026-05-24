@@ -236,6 +236,10 @@ These items can run without external broker credentials:
   - Reports DB, kill switch, environment, reconciliation, recent data, and optional market data status.
 - Discord operator guard
   - Dangerous execution commands can be restricted with `DISCORD_OPERATOR_USER_IDS`.
+- `src/mock_broker_adapter.py`
+  - In-memory broker lifecycle simulator for adapter contract tests.
+- `SIGNAL_CAPTURE_MARKET_REACTION=false`
+  - Optional signal-generation hook for capturing market reaction snapshots immediately after signal upsert. Keep it off for fast routine runs, turn it on for deeper paper/sandbox runs.
 
 Current local validation:
 

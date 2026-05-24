@@ -328,6 +328,12 @@ python -m pytest -q
   - `TradingExecutor` now blocks execution when market data is missing or stale.
 - Added Discord operator guard:
   - `DISCORD_OPERATOR_USER_IDS` restricts approval, debate queue mutation, and kill-switch commands when configured.
+- Added broker adapter contract hardening:
+  - `BrokerAdapter` now includes open order, fill, and cancel lifecycle methods.
+  - `PaperBroker` implements the expanded lifecycle surface.
+  - `src/mock_broker_adapter.py` provides an in-memory sandbox mock for adapter contract tests.
+- Added optional market reaction capture during signal generation:
+  - `SIGNAL_CAPTURE_MARKET_REACTION=false` by default to avoid slowing routine signal jobs.
 - Extended data quality reporting with market reaction coverage and latest reconciliation status.
 - Validation:
 

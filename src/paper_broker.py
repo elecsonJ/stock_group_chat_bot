@@ -23,6 +23,23 @@ class PaperBroker(BrokerAdapter):
     def get_positions(self) -> list[dict[str, Any]]:
         return self.db.list_paper_positions()
 
+    def get_open_orders(self) -> list[dict[str, Any]]:
+        return self.db.list_paper_orders(limit=100, statuses=["submitted", "pending", "partially_filled"])
+
+    def get_fills(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.db.list_paper_fills(limit=limit)
+
+    def cancel_order(self, client_order_id: str) -> dict[str, Any]:
+        order = self.db.get_paper_order(client_order_id)
+        if not order:
+            return {"ok": False, "client_order_id": client_order_id, "status": "not_found"}
+        if order.get("status") == "filled":
+            return {"ok": False, "client_order_id": client_order_id, "status": "already_filled"}
+        order["status"] = "canceled"
+        order["notes"] = (order.get("notes") or "") + " canceled"
+        self.db.save_paper_order(order)
+        return {"ok": True, "client_order_id": client_order_id, "status": "canceled"}
+
     def refresh_market_prices(self, price_map: dict[str, float]) -> dict[str, Any]:
         positions = self.db.list_paper_positions()
         total_unrealized = 0.0
